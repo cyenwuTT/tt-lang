@@ -157,7 +157,7 @@ def run_script_in_process(
             marks=requires_ttnn_marks,
         ),
         pytest.param(
-            "elementwise-tutorial/step_4_multinode_grid_auto.py",
+            "elementwise-tutorial/step_4_multinode_grid_full.py",
             marks=requires_ttnn_marks,
         ),
         pytest.param(
@@ -422,7 +422,7 @@ def test_max_dfbs_warning_warns_at_limit(scheduler: str) -> None:
         # coroutine steps at M=K=N=8192 to be practical.
         "step_2_single_node_multitile_block.py",
         "step_3_multinode.py",
-        "step_4_multinode_grid_auto.py",
+        "step_4_multinode_grid_full.py",
         "step_5_multidevice_shard_m.py",
         "step_6_multidevice_shard_k.py",
     ],
