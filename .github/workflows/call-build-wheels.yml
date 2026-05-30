@@ -41,6 +41,21 @@ on:
         type: string
         default: ""
         required: false
+      build_sim_wheel:
+        description: "Build and test the tt-lang-sim wheel."
+        type: boolean
+        default: true
+        required: false
+      allow_final_internal_version:
+        description: "Allow bundled/external internal wheels to use a final release version."
+        type: boolean
+        default: false
+        required: false
+      artifact_name:
+        description: "Artifact name for uploaded wheels."
+        type: string
+        default: tt-lang-wheels
+        required: false
 
 permissions:
   contents: read
@@ -98,6 +113,7 @@ jobs:
           TTLANG_EXTERNAL_TT_METAL_BUILD_DIR: ${{ inputs.external_tt_metal_build_dir }}
           TTLANG_BUNDLED_TT_METAL_DIR: ${{ inputs.bundled_tt_metal_dir }}
           TTLANG_PYTHON_VENV: ${{ inputs.external_python_venv }}
+          TTLANG_ALLOW_FINAL_INTERNAL_VERSION: ${{ inputs.allow_final_internal_version }}
         run: |
           source /opt/ttlang-toolchain/venv/bin/activate
           pip wheel . --wheel-dir=dist-raw --no-deps --no-build-isolation
@@ -139,13 +155,14 @@ jobs:
           python .github/scripts/check-installed-ttnn.py --mode "${{ inputs.ttnn_dep_mode }}"
           python .github/scripts/smoke-test-wheel.py
 
-      - name: Free disk space before tt-lang-sim wheel test
+      - name: Free disk space before remaining wheel tests
         run: |
           rm -rf /tmp/test-venv-hw /tmp/ttlang-prefix build dist-raw
           python3.12 -m pip cache purge || true
           df -h
 
       - name: Build tt-lang-sim wheel
+        if: ${{ inputs.build_sim_wheel }}
         env:
           TTLANG_VERSION_OVERRIDE: ${{ inputs.version_override }}
         run: |
@@ -153,6 +170,7 @@ jobs:
           pip wheel packaging/sim --wheel-dir=dist --no-deps --no-build-isolation
 
       - name: Test tt-lang-sim wheel
+        if: ${{ inputs.build_sim_wheel }}
         run: |
           python3.12 -m venv /tmp/test-venv-sim
           source /tmp/test-venv-sim/bin/activate
@@ -168,6 +186,7 @@ jobs:
         env:
           TTLANG_VERSION_OVERRIDE: ${{ inputs.version_override }}
           TTLANG_LIGHT_TTLANG_VERSION: ${{ steps.versions.outputs.light_version }}
+          TTLANG_ALLOW_FINAL_INTERNAL_VERSION: ${{ inputs.allow_final_internal_version }}
         run: |
           source /opt/ttlang-toolchain/venv/bin/activate
           pip wheel packaging/light --wheel-dir=dist --no-deps --no-build-isolation
@@ -186,6 +205,6 @@ jobs:
       - name: Upload wheels
         uses: actions/upload-artifact@v7
         with:
-          name: tt-lang-wheels
+          name: ${{ inputs.artifact_name }}
           path: dist/*.whl
           retention-days: 14

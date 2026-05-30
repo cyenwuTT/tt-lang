@@ -5,6 +5,10 @@
 name: Publish S3 PyPI Wheels
 
 on:
+  push:
+    tags:
+      # Publish clean-version internal bundled/light wheels for stable releases.
+      - 'v[0-9]+.[0-9]+.[0-9]+'
   schedule:
     # Nightly S3-only internal wheel publish. GitHub cron uses UTC.
     - cron: "0 8 * * *"
@@ -20,12 +24,13 @@ on:
         type: string
         default: ""
         required: false
-      ttnn_dep_mode:
-        description: "ttnn dependency mode for the tt-lang wheel."
+      wheel_variant:
+        description: "Wheel variant set to publish to S3 PyPI."
         type: choice
         options:
           - bundled
-          - external
+          - light
+          - bundled-and-light
           - pypi
         default: bundled
         required: true
@@ -58,7 +63,10 @@ jobs:
       dry_run: ${{ steps.resolve.outputs.dry_run }}
       overwrite_releases: ${{ steps.resolve.outputs.overwrite_releases }}
       version_override: ${{ steps.resolve.outputs.version_override }}
-      ttnn_dep_mode: ${{ steps.resolve.outputs.ttnn_dep_mode }}
+      wheel_variant: ${{ steps.resolve.outputs.wheel_variant }}
+      wheel_variants: ${{ steps.resolve.outputs.wheel_variants }}
+      wheel_matrix: ${{ steps.resolve.outputs.wheel_matrix }}
+      allow_final_internal_version: ${{ steps.resolve.outputs.allow_final_internal_version }}
 
     steps:
       - name: Checkout tt-lang
@@ -74,7 +82,7 @@ jobs:
           DISPATCH_DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.dry_run) || 'false' }}
           DISPATCH_OVERWRITE_RELEASES: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.overwrite_releases) || 'false' }}
           DISPATCH_VERSION_OVERRIDE: ${{ github.event_name == 'workflow_dispatch' && inputs.version_override || '' }}
-          DISPATCH_TTNN_DEP_MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.ttnn_dep_mode || 'bundled' }}
+          DISPATCH_WHEEL_VARIANT: ${{ github.event_name == 'workflow_dispatch' && inputs.wheel_variant || '' }}
           EVENT_NAME: ${{ github.event_name }}
         run: .github/scripts/resolve-s3-publish-inputs.sh
 
@@ -93,22 +101,29 @@ jobs:
   build-wheels:
     needs: [preflight, build-docker]
     if: ${{ always() && needs.preflight.result == 'success' && (needs.build-docker.result == 'success' || needs.build-docker.result == 'skipped') }}
+    name: "Build ${{ matrix.wheel_variant }} wheels"
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.preflight.outputs.wheel_matrix) }}
     permissions:
       contents: read
       packages: read
     uses: ./.github/workflows/call-build-wheels.yml
     with:
       docker_tag: ${{ needs.preflight.outputs.docker_tag != '' && needs.preflight.outputs.docker_tag || needs.build-docker.outputs.docker-tag }}
-      ttnn_dep_mode: ${{ needs.preflight.outputs.ttnn_dep_mode }}
+      ttnn_dep_mode: ${{ matrix.ttnn_dep_mode }}
       version_override: ${{ needs.preflight.outputs.version_override }}
-      external_tt_metal_dir: ${{ needs.preflight.outputs.ttnn_dep_mode == 'external' && '/opt/ttlang-toolchain/tt-metal' || '' }}
-      external_python_venv: ${{ needs.preflight.outputs.ttnn_dep_mode == 'external' && '/opt/ttlang-toolchain/venv' || '' }}
-      bundled_tt_metal_dir: ${{ needs.preflight.outputs.ttnn_dep_mode == 'bundled' && '/opt/ttlang-toolchain/tt-metal' || '' }}
+      external_tt_metal_dir: ${{ matrix.ttnn_dep_mode == 'external' && '/opt/ttlang-toolchain/tt-metal' || '' }}
+      external_python_venv: ${{ matrix.ttnn_dep_mode == 'external' && '/opt/ttlang-toolchain/venv' || '' }}
+      bundled_tt_metal_dir: ${{ matrix.ttnn_dep_mode == 'bundled' && '/opt/ttlang-toolchain/tt-metal' || '' }}
+      build_sim_wheel: ${{ !(needs.preflight.outputs.wheel_variant == 'bundled-and-light' && matrix.wheel_variant == 'light') }}
+      allow_final_internal_version: ${{ needs.preflight.outputs.allow_final_internal_version == 'true' }}
+      artifact_name: tt-lang-wheels-${{ matrix.wheel_variant }}
 
   publish:
     name: "Publish wheels to S3 PyPI"
     needs: [preflight, build-wheels]
-    if: ${{ needs.build-wheels.result == 'success' }}
+    if: ${{ always() && needs.preflight.result == 'success' && needs.build-wheels.result == 'success' }}
     runs-on: ubuntu-22.04
     timeout-minutes: 30
 
@@ -124,19 +139,48 @@ jobs:
       - name: Checkout tt-lang
         uses: actions/checkout@v6
 
-      - name: Download wheels
+      - name: Download bundled wheels
+        if: ${{ contains(fromJSON(needs.preflight.outputs.wheel_variants), 'bundled') }}
         uses: actions/download-artifact@v8
         with:
-          name: tt-lang-wheels
-          path: dist
+          name: tt-lang-wheels-bundled
+          path: wheel-artifacts/bundled
 
-      - name: Verify wheel versions
+      - name: Download light wheels
+        if: ${{ contains(fromJSON(needs.preflight.outputs.wheel_variants), 'light') }}
+        uses: actions/download-artifact@v8
+        with:
+          name: tt-lang-wheels-light
+          path: wheel-artifacts/light
+
+      - name: Download pypi wheels
+        if: ${{ contains(fromJSON(needs.preflight.outputs.wheel_variants), 'pypi') }}
+        uses: actions/download-artifact@v8
+        with:
+          name: tt-lang-wheels-pypi
+          path: wheel-artifacts/pypi
+
+      - name: Prepare publish dist
         run: |
           set -euo pipefail
-          .github/scripts/verify-s3-wheel-versions.sh \
-            "${{ needs.preflight.outputs.ttnn_dep_mode }}" \
+          prepare_args=()
+          if [ -d wheel-artifacts/bundled ]; then
+            prepare_args+=(bundled=wheel-artifacts/bundled)
+          fi
+          if [ -d wheel-artifacts/light ]; then
+            if [ -d wheel-artifacts/bundled ]; then
+              prepare_args+=(light:no-sim=wheel-artifacts/light)
+            else
+              prepare_args+=(light=wheel-artifacts/light)
+            fi
+          fi
+          if [ -d wheel-artifacts/pypi ]; then
+            prepare_args+=(pypi=wheel-artifacts/pypi)
+          fi
+          .github/scripts/prepare-s3-publish-dist.sh \
             "${{ needs.preflight.outputs.version_override }}" \
-            dist
+            dist \
+            "${prepare_args[@]}"
 
       - name: Configure AWS Credentials
         if: ${{ needs.preflight.outputs.dry_run != 'true' }}
@@ -168,5 +212,5 @@ jobs:
           fi
           .github/scripts/publish-s3-summary.sh \
             "${summary_args[@]}" \
-            "${{ needs.preflight.outputs.ttnn_dep_mode }}" \
+            "${{ needs.preflight.outputs.wheel_variant }}" \
             "${{ needs.preflight.outputs.version_override }}"

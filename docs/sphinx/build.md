@@ -560,24 +560,32 @@ ird image tag):
 #### Publishing to S3 PyPI
 
 `publish-s3-pypi.yml` publishes internal wheels to the Tenstorrent S3 PyPI
-index at `https://pypi.eng.aws.tenstorrent.com/`. It runs nightly on a GitHub
-schedule and can also be dispatched manually. It uses GitHub OIDC for AWS access,
-then uploads with
+index at `https://pypi.eng.aws.tenstorrent.com/`. It runs on stable release tag
+pushes, runs nightly on a GitHub schedule, and can also be dispatched manually.
+It uses GitHub OIDC for AWS access, then uploads with
 `s3pypi upload --put-root-index --bucket tenstorrent-pypi`.
 
-Do not publish a bundled internal wheel with the same package name and version
-as the public PyPI wheel if the public wheel has different dependency metadata.
-For example, a public `tt-lang` release may depend on a separately published
-`ttnn` wheel, while an internal S3 `tt-lang` wheel at the same version may
-bundle `ttnn` directly.
-Those two artifacts are not interchangeable, and pip can see both indexes when
-`--extra-index-url` is used.
+The workflow prevents publishing a bundled internal `tt-lang` wheel with the
+same package name and version as the public PyPI wheel when public PyPI
+publishing is already valid for that tt-metal tag. This avoids having two
+indexes expose `tt-lang==X.Y.Z` artifacts with different dependency metadata.
 
 Automatic S3 publishing should use this policy:
 
-- Release or RC tags may publish to S3 only when the S3 artifact version is
-  distinct from the public PyPI artifact version, or when the S3 artifact is
-  byte-for-byte equivalent in dependency semantics.
+- Stable release tags (`vX.Y.Z`) publish clean-version bundled and light wheels
+  to S3 only when public PyPI publishing is blocked because
+  `TTNN_PYPI_TT_METAL_TAG != TT_METAL_TAG`.
+- Stable release tags publish only light wheels to S3 when public PyPI
+  publishing is aligned. In that case public PyPI owns `tt-lang==X.Y.Z`, and S3
+  owns `tt-lang==X.Y.Z+light` plus `tt-lang-light==X.Y.Z`.
+- Manual stable-version S3 publishes that include the bundled variant are
+  rejected when public PyPI publishing is aligned for the same tt-metal tag.
+- The S3 resolver passes `TTLANG_ALLOW_FINAL_INTERNAL_VERSION=true` to the wheel
+  builder only after this conflict check has passed, so final-version internal
+  wheels cannot bypass the release guard.
+- Do not mix public PyPI and S3 indexes for a `tt-lang` version whose artifacts
+  have different dependency semantics. Use the S3 install command emitted by the
+  workflow summary for internal release wheels.
 - Nightly builds do not create Git tags. The scheduled workflow computes a
   PEP 440 development version of the form `<MAJOR.MINOR.PATCH>.dev<YYYYMMDD>`,
   where the base version matches the latest stable tag reachable from `HEAD`,
@@ -586,16 +594,22 @@ Automatic S3 publishing should use this policy:
   keeps nightly versions readable, but existing local pip caches may still hold
   the older wheel for that version.
 
-The scheduled workflow defaults to `ttnn_dep_mode: bundled`, builds and pushes
-the matching IRD image, builds wheels from that image, verifies the wheel
-versions, and publishes the result to S3 PyPI.
+Stable tag pushes derive `version_override` from the tag (`v1.1.2` -> `1.1.2`),
+build and push the matching IRD image, build the selected wheel variants from
+that image, verify the wheel versions, and publish the result to S3 PyPI. The
+selected variant set is `bundled-and-light` when public PyPI publishing is
+blocked, and `light` when public PyPI publishing is aligned.
+
+The scheduled workflow also defaults to `wheel_variant: bundled-and-light`,
+builds and pushes the matching IRD image, builds bundled and light wheels from
+that image, verifies the wheel versions, and publishes the result to S3 PyPI.
 
 For a manual bundled internal wheel with an existing IRD image, dispatch the
 workflow with:
 
 ```text
 docker_tag: <existing-ird-tag>
-ttnn_dep_mode: bundled
+wheel_variant: bundled
 version_override: <internal-version>
 ```
 
@@ -610,15 +624,29 @@ For light wheels that must use a user-provided tt-metal build instead of a
 bundled or public `ttnn` wheel, dispatch the workflow with:
 
 ```text
-ttnn_dep_mode: external
+wheel_variant: light
 version_override: <internal-version>
 ```
 
-The reusable wheel build sets `TTLANG_TTNN_DEP_MODE=external` and
+The workflow maps this publish selection to the reusable wheel builder's
+`TTLANG_TTNN_DEP_MODE=external` build mode and sets
 `TTLANG_VERSION_OVERRIDE=<version_override>+light`. The resulting `tt-lang` wheel
 omits `Requires-Dist: ttnn`; the normal PyPI build keeps that requirement. The
 same build also emits `tt-lang-light==<version_override>`, a metapackage that
 depends on `tt-lang==<version_override>+light`.
+
+To publish bundled and light wheels from the same workflow run, dispatch with:
+
+```text
+wheel_variant: bundled-and-light
+version_override: <internal-version>
+```
+
+The workflow builds the bundled and light wheel sets separately, uploads
+mode-specific artifacts, verifies each artifact with the expected version rules,
+then publishes a single combined directory. The light build skips
+`tt-lang-sim` in this mode because the bundled build already provides the same
+`tt-lang-sim==<version_override>` package/version for the S3 index.
 
 #### Local internal wheel testing
 
@@ -671,18 +699,34 @@ pip wheel packaging/light --wheel-dir=/tmp/ttlang-wheels/light/dist \
   --no-deps --no-build-isolation
 ```
 
-Install-test the light package from the local wheel directory, then configure
-the external tt-metal environment:
+Install-test the light package from the local wheel directory. The setup command
+copies tutorials into `./tutorials/` and skips sfpi installation for light
+installs because the external tt-metal tree provides sfpi:
 
 ```bash
 python3.12 -m venv /tmp/ttlang-light-test
 source /tmp/ttlang-light-test/bin/activate
 pip install --find-links=/tmp/ttlang-wheels/light/dist \
   "tt-lang-light==$TTLANG_VERSION"
-tt-lang-setup-external-tt-metal \
-  --tt-metal-dir /opt/ttlang-toolchain/tt-metal \
-  --check \
-  -- python -c 'import ttl, ttnn; print(ttl.__version__, ttnn.__file__)'
+tt-lang-setup
+```
+
+Configure the external tt-metal environment and validate imports:
+
+```bash
+external_tt_metal_env="$(
+  tt-lang-setup-external-tt-metal \
+    --tt-metal-dir /opt/ttlang-toolchain/tt-metal \
+    --check
+)" && eval "$external_tt_metal_env"
+python -c 'import ttl, ttnn; print(ttl.__version__, ttnn.__file__)'
+```
+
+The TT-Lang tutorial can then run from the local directory copied by
+`tt-lang-setup`:
+
+```bash
+python tutorials/elementwise/step_4_multinode_grid_full.py
 ```
 
 ## CMake Options
