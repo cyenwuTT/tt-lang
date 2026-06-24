@@ -3,6 +3,39 @@
 This document describes the current end-to-end process flow implemented in
 `python/sim_stats/cycle_estimator.py`.
 
+## Quick Workflow (v0)
+
+The repository includes a higher-level cycle estimator for simulator traces:
+
+```bash
+tt-lang-sim-cycles trace.jsonl
+```
+
+The estimator follows a roofline-style model and reports per-kernel metrics:
+
+- estimated cycles
+- measured cycles
+- prediction error percentage
+- roofline efficiency
+- operational intensity
+- compute-bound vs memory-bound classification
+
+Example with explicit model parameters and JSON export:
+
+```bash
+tt-lang-sim-cycles trace.jsonl \
+  --flops-per-tile 2048 \
+  --bytes-per-tile 2048 \
+  --peak-flops-per-cycle 4096 \
+  --memory-bytes-per-cycle 1024 \
+  --json-out cycle_report.json
+```
+
+This v0 tool is intended for explainable kernel-level estimation. Lower-level
+Tensix-specific refinement should only be added when mismatch analysis indicates
+that the higher-level model is insufficient.
+
+---
 ## Scope
 
 The current implementation is a higher-level, roofline-style estimator for
