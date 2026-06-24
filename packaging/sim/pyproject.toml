@@ -30,6 +30,7 @@ dynamic = ["version", "readme", "dependencies"]
 [project.scripts]
 tt-lang-sim = "ttl.sim.ttlang_sim:main"
 tt-lang-sim-stats = "sim_stats.__main__:main"
+tt-lang-sim-cycles = "sim_stats.cycle_estimator:main"
 tt-lang-setup = "ttl._setup.cli:main"
 tt-lang-setup-tutorials = "ttl._setup.tutorials:main"
 
