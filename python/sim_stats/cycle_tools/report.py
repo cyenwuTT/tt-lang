@@ -15,19 +15,24 @@ from .types import EstimatorConfig, KernelEstimate, KernelGroupEstimate
 from ..utils import format_float
 
 
+# WAPE formula (weighted by measured cycles).
 def _weighted_abs_error_pct(pairs: list[tuple[float, int]]) -> float:
     numerator = 0.0
     denominator = 0
+
     for estimate, measured in pairs:
         if measured <= 0:
             continue
         numerator += abs((estimate - float(measured)) / float(measured) * 100.0) * measured
         denominator += measured
+   
     if denominator == 0:
         return math.nan
+   
     return numerator / denominator
 
 
+# Ablation: measure how much the blocked-cycle term contributes.
 def ablation_metrics(rows: list[KernelEstimate]) -> dict[str, float]:
     full_pairs: list[tuple[float, int]] = []
     no_blocked_pairs: list[tuple[float, int]] = []
@@ -46,6 +51,7 @@ def ablation_metrics(rows: list[KernelEstimate]) -> dict[str, float]:
     blocked_share_pct = (
         blocked_share_num / blocked_share_den * 100.0 if blocked_share_den > 0.0 else math.nan
     )
+
     return {
         "full_wape_pct": _weighted_abs_error_pct(full_pairs),
         "no_blocked_wape_pct": _weighted_abs_error_pct(no_blocked_pairs),
@@ -67,6 +73,7 @@ def feature_provenance() -> dict[str, str]:
     }
 
 
+# Calibration scale suggestions per role.
 def role_calibration_suggestions(rows: list[KernelEstimate]) -> dict[str, float]:
     measured_sum: dict[str, float] = {
         "compute": 0.0,
@@ -74,6 +81,7 @@ def role_calibration_suggestions(rows: list[KernelEstimate]) -> dict[str, float]
         "write": 0.0,
         "other": 0.0,
     }
+
     base_sum: dict[str, float] = {
         "compute": 0.0,
         "read": 0.0,
@@ -88,11 +96,13 @@ def role_calibration_suggestions(rows: list[KernelEstimate]) -> dict[str, float]
         base_sum[role] += non_blocked_base
 
     out: dict[str, float] = {}
+    
     for role in ("compute", "read", "write", "other"):
         if base_sum[role] > 0.0:
             out[role] = measured_sum[role] / base_sum[role]
         else:
             out[role] = math.nan
+    
     return out
 
 
@@ -105,7 +115,9 @@ def print_report(rows: list[KernelEstimate], threshold_pct: float) -> None:
         f"{'Kernel':<28} {'Role':<8} {'Measured':>10} {'Estimated':>10} "
         f"{'Err%':>8} {'Eff':>7} {'M-Eff':>7} {'OI':>8} {'Bound':<14}"
     )
+    
     width = len(header)
+    
     print("\n" + "=" * width)
     print("TT-Lang Trace Cycle Estimation (v0.1 roofline model)")
     print("=" * width)
@@ -137,18 +149,24 @@ def print_report(rows: list[KernelEstimate], threshold_pct: float) -> None:
     wape = _weighted_abs_error_pct(full_pairs)
 
     print("-" * width)
+    
     if math.isfinite(wape):
         print(f"Weighted abs error %: {format_float(wape)}")
     else:
         print("Weighted abs error %: n/a")
+    
     print(
         "Kernels above mismatch threshold "
         f"({format_float(threshold_pct)}%): {above_threshold_count}/{len(rows)}"
     )
+    
     print(f"Kernels that need lower-level model: {refine_count}/{len(rows)}")
+    
     mismatch_rows = [r for r in rows if r.abs_error_pct > threshold_pct]
     mismatch_rows.sort(key=lambda r: r.abs_error_pct, reverse=True)
+    
     print("\nMismatch notes (top 15 by abs error):")
+    
     for row in mismatch_rows[:15]:
         print(f"- {row.kernel}: {row.mismatch_reason}")
     if len(mismatch_rows) > 15:
@@ -158,20 +176,24 @@ def print_report(rows: list[KernelEstimate], threshold_pct: float) -> None:
         f"{'Node':<28} {'Kernels':>7} {'Measured':>10} {'Estimated':>10} {'Err%':>8}"
     )
     group_width = len(group_header)
+    
     print("\n" + "=" * group_width)
     print("Kernel-Level Group Totals (heuristic critical-path v0.1)")
     print("=" * group_width)
     print(group_header)
     print("-" * group_width)
+    
     for group in groups:
         print(
             f"{group.node:<28} {group.kernel_count:>7d} "
             f"{group.measured_cycles:>10d} {format_float(group.estimated_cycles):>10} "
             f"{format_float(group.signed_error_pct):>8}"
         )
+    
     print("-" * group_width)
 
     ablation = ablation_metrics(rows)
+    
     print("\nAblation Diagnostics (internal)")
     print(f"- Full model WAPE%: {format_float(ablation['full_wape_pct'])}")
     print(f"- No-blocked-term WAPE%: {format_float(ablation['no_blocked_wape_pct'])}")
@@ -182,11 +204,13 @@ def print_report(rows: list[KernelEstimate], threshold_pct: float) -> None:
     )
 
     provenance = feature_provenance()
+    
     print("\nFeature Provenance Audit (internal)")
     for key in sorted(provenance):
         print(f"- {key}: {provenance[key]}")
 
     role_scales = role_calibration_suggestions(rows)
+    
     print("\nCalibration Suggestions (non-blocked base -> measured)")
     print("- Use profiler/perf-summary wall-time as ground truth when available.")
     for role in ("compute", "read", "write", "other"):

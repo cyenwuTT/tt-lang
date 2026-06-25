@@ -168,6 +168,12 @@ def main() -> None:
 
     if args.json_out is not None:
         out_path = args.json_out.resolve()
+        if not out_path.parent.exists():
+            print(
+                f"Error: output directory does not exist: {out_path.parent}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
         groups = group_kernel_estimates(rows)
         write_json_report(out_path, rows, groups, config)
         print(f"\nWrote JSON report: {out_path}")

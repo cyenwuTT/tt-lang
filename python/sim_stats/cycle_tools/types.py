@@ -35,7 +35,6 @@ class KernelFeatures:
     local_l1_tiles: int = 0
     remote_l1_tiles: int = 0
     dram_tiles: int = 0
-    # Phase-duration features (new): trace-derived event pairs.
     dfb_wait_block_cycles: int = 0
     dfb_reserve_block_cycles: int = 0
     copy_duration_cycles: int = 0
@@ -52,8 +51,9 @@ class EstimatorConfig:
     reserve_event_cycles: float = 2.0
     sync_event_cycles: float = 1.0
     copy_call_cycles: float = 4.0
-    blocked_cycle_weight: float = 0.0
+    blocked_cycle_weight: float = 0.0  # Keep at 0 to prevent leakage into predictions.
     kernel_launch_cycles: float = 0.0
+    
     # Phase-duration scaling coefficients.
     dfb_wait_block_scale: float = 1.0
     dfb_reserve_block_scale: float = 1.0
@@ -81,7 +81,8 @@ class KernelEstimate:
     copy_overhead_cycles: float
     blocked_cycles_term: float
     launch_cycles: float
-    # Phase-duration contributions to estimate.
+    
+    # Phase-duration contributions captured in the estimate.
     dfb_wait_block_contribution: float
     dfb_reserve_block_contribution: float
     copy_duration_contribution: float

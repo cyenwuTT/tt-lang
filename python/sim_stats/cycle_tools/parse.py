@@ -30,10 +30,12 @@ def parse_trace(path: Path) -> list[TraceEvent]:
             for k, v in obj.items()
             if k not in {"tick", "event", "kernel", "node"}
         }
+        
         if "node" in obj:
             data["node"] = obj["node"]
 
         events.append(TraceEvent(tick=tick, event=event, kernel=kernel, data=data))
+    
     return events
 
 
@@ -50,18 +52,22 @@ def extract_kernel_features(events: list[TraceEvent]) -> dict[str, KernelFeature
     for ev in events:
         max_tick = max(max_tick, ev.tick)
         kernel = ev.kernel
+        
         if not kernel:
             continue
 
         feature = features.get(kernel)
+        
         if feature is None:
             node = node_from_kernel(kernel)
             suffix = kernel.removeprefix(f"{node}-") if node != kernel else ""
             role = suffix if suffix in {"compute", "read", "write"} else "other"
+            
             try:
                 node_idx = int(node.replace("node", ""))
             except (ValueError, AttributeError):
                 node_idx = 0
+            
             feature = KernelFeatures(kernel=kernel, role=role, node_index=node_idx)
             features[kernel] = feature
 
@@ -142,15 +148,17 @@ def extract_kernel_features(events: list[TraceEvent]) -> dict[str, KernelFeature
                 del copy_starts[kernel]
             continue
 
+    # Close any intervals still open at trace end.
     for kernel, stack in open_states.items():
         feature = features.get(kernel)
         assert feature is not None
+        
         for st in stack:
-            # If the trace ended before kernel_end, close intervals at max_tick.
             if st.block_start_tick is not None:
                 feature.blocked_cycles += max(0, max_tick - st.block_start_tick)
             feature.measured_cycles += max(0, max_tick - st.start_tick)
 
+    # active_cycles = measured - blocked.
     for feature in features.values():
         feature.active_cycles = max(0, feature.measured_cycles - feature.blocked_cycles)
 

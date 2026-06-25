@@ -2,7 +2,6 @@
 
 from .cli import build_estimation_pipeline, main
 from .model import (
-    bound_classification,
     estimate_kernel_cycles,
     group_kernel_estimates,
     mismatch_reason,
@@ -31,7 +30,6 @@ __all__ = [
     "KernelGroupEstimate",
     "parse_trace",
     "extract_kernel_features",
-    "bound_classification",
     "mismatch_reason",
     "estimate_kernel_cycles",
     "group_kernel_estimates",
