@@ -34,6 +34,7 @@ extensions = [
     "sphinx.ext.napoleon",
     "sphinx.ext.viewcode",
     "sphinxcontrib.mermaid",
+    "sphinx_reredirects",
 ]
 
 source_suffix = {
@@ -79,6 +80,11 @@ html_context = {
     "versions": None,
     "logo_link_url": os.environ.get("homepage", "https://docs.tenstorrent.com/"),
     "search_site_base_url": "https://docs.tenstorrent.com/tt-lang/",
+}
+
+redirects = {
+    "tour/operation-basics": "index.html#operation-basics",
+    "tour/dataflow-buffers": "index.html#dataflow-buffers",
 }
 
 
