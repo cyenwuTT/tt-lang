@@ -1,275 +1,206 @@
-# Cycle Estimator User Guide (v0.1)
+# Cycle Estimator — v1.0 Restructure (Development Plan)
 
-## Overview
+**Status:** v0.1 is being replaced, not extended. v0.1 predicts a *logical-time* signal, not
+hardware cycles; no weight tuning fixes that. v1.0 re-bases the estimator on an analytical
+peak-performance model. This document is the development reference and tracking checklist for
+the v0.1 → v1.0 restructure. The self-check checklist is at the end.
 
-`tt-lang-sim-cycles` reads a simulator trace produced by `tt-lang-sim --trace` and estimates cycle counts for each kernel. The goal is to explain where cycles are spent — without running on real hardware — so bottlenecks can be identified and compared across design iterations.
-
-The estimator uses a **phase-duration-first** model: the primary cost signals are the actual durations of blocking phases recorded in the trace (DFB wait/reserve stalls, copy transfer spans), not counts or abstract roofline projections. Roofline compute and memory ceilings are computed alongside the estimate and reported as secondary context for bound classification.
-
-This document is a user guide. For the internal implementation layout, see the source files under `python/sim_stats/cycle_tools/`.
-
----
-
-## Running the Estimator
-
-Generate a trace with `tt-lang-sim`, then pass the trace file to `tt-lang-sim-cycles`:
-
-```bash
-tt-lang-sim examples/single_node_matmul.py --trace trace.jsonl
-tt-lang-sim-cycles trace.jsonl
-```
-
-The estimator prints a per-kernel table to the terminal and exits. All model parameters have reasonable defaults; no configuration is required for a first run.
-
-To also export a machine-readable JSON report:
-
-```bash
-tt-lang-sim-cycles trace.jsonl --json-out cycle_report.json
-```
-
-To override model parameters explicitly:
-
-```bash
-tt-lang-sim-cycles trace.jsonl \
-  --flops-per-tile 2048 \
-  --bytes-per-tile 2048 \
-  --peak-flops-per-cycle 4096 \
-  --memory-bytes-per-cycle 1024 \
-  --dfb-wait-block-scale 1.0 \
-  --dfb-reserve-block-scale 1.0 \
-  --copy-duration-scale 1.0 \
-  --mismatch-threshold-pct 20 \
-  --json-out cycle_report.json
-```
-
-Run `tt-lang-sim-cycles --help` to see all available options with their defaults.
+For the current (v0.1) source layout see `python/sim_stats/cycle_tools/`.
 
 ---
 
-## What the Estimator Measures
+## 1. Background — what v0.1 does
 
-The simulator records trace events with integer **tick** values. One tick is one scheduler activation: the scheduler increments the tick counter each time it hands control to a kernel. This is the same logical time used by the simulator's tracing system (see `docs/TRACING.md`).
-
-The estimator reads three classes of timing signals from the trace.
-
-### Kernel span
-
-`kernel_start` and `kernel_end` bracket the total time a kernel was active, including any time it spent blocked:
-
-$$T_{\text{measured}} = t_{\text{kernel\_end}} - t_{\text{kernel\_start}}$$
-
-`kernel_block` and `kernel_unblock` mark spans when the kernel was waiting on a DFB slot and doing no useful work:
-
-$$T_{\text{blocked}} = \sum (t_{\text{kernel\_unblock}} - t_{\text{kernel\_block}})$$
-
-$$T_{\text{active}} = T_{\text{measured}} - T_{\text{blocked}}$$
-
-`T_measured` is the ground-truth cost used for error calculation. It is read from the trace and never fed back into the prediction path.
-
-### Phase-duration signals
-
-These are the primary inputs to the v0.1 estimator. Each is the accumulated tick span of paired begin/end events within a kernel's lifetime:
-
-$$D_{\text{wait}} = \sum (t_{\text{dfb\_wait\_end}} - t_{\text{dfb\_wait\_begin}})$$
-
-$$D_{\text{reserve}} = \sum (t_{\text{dfb\_reserve\_end}} - t_{\text{dfb\_reserve\_begin}})$$
-
-$$D_{\text{copy}} = \sum (t_{\text{copy\_end}} - t_{\text{copy\_start}})$$
-
-$D_{\text{wait}}$ captures how long a kernel spent waiting to consume from a DFB (consumer stall). $D_{\text{reserve}}$ captures how long it spent waiting to write into a DFB (producer stall). $D_{\text{copy}}$ captures DMA transfer time.
-
-### Event counters
-
-In addition to durations, the estimator counts individual events: `dfb_wait_begin`, `dfb_reserve_begin`, `dfb_push`, `dfb_pop`, and `copy_end`. These feed the per-event overhead terms described in the next section.
-
----
-
-## The Estimation Model
-
-For each kernel the estimator computes an estimate $\hat{T}$ composed of three additive groups: phase-duration contributions, overhead terms, and a roofline base.
-
-### Phase-duration contributions (primary)
-
-Each phase-duration signal is scaled by a configurable coefficient:
-
-$$P_{\text{wait}} = D_{\text{wait}} \times s_{\text{wait}}$$
-
-$$P_{\text{reserve}} = D_{\text{reserve}} \times s_{\text{reserve}}$$
-
-$$P_{\text{copy}} = D_{\text{copy}} \times s_{\text{copy}}$$
-
-The scale factors $s_{\text{wait}}$, $s_{\text{reserve}}$, $s_{\text{copy}}$ default to 1.0. They can be tuned with a profiler or the calibration suggestions
-printed at the end of the report (see **Reading the Output**).
-
-### Overhead terms (secondary)
-
-Per-event fixed costs account for DFB coordination overhead:
-
-$$S_{\text{stall}} = n_{\text{wait}} \cdot c_{\text{wait}} + n_{\text{reserve}} \cdot c_{\text{reserve}}$$
-
-$$S_{\text{sync}} = (n_{\text{push}} + n_{\text{pop}}) \cdot c_{\text{sync}}$$
-
-$$S_{\text{copy}} = n_{\text{copy\_calls}} \cdot c_{\text{copy}}$$
-
-where $c_{*}$ are the per-event cycle costs set in `EstimatorConfig`.
-
-### Roofline base (secondary context)
-
-The roofline terms provide a hardware-ceiling lower bound and serve as a sanity check, not as the dominant cost signal. Tile counts from the trace drive the
-computation:
-
-$$C_{\text{compute}} = \frac{(\text{wait\_tiles} + \text{reserve\_tiles}) \times F_{\text{tile}}}{R_{\text{flops}}}$$
-
-$$C_{\text{memory}} = \frac{\text{memory\_tiles} \times B_{\text{tile}}}{R_{\text{bytes}}}$$
-
-$$C_{\text{roofline}} = \max(C_{\text{compute}},\; C_{\text{memory}})$$
-
-$F_{\text{tile}}$ and $B_{\text{tile}}$ are the assumed flops and bytes per tile.
-$R_{\text{flops}}$ and $R_{\text{bytes}}$ are the hardware peak rates, set via `--peak-flops-per-cycle` and `--memory-bytes-per-cycle`.
-
-### Final estimate
-
-$$\boxed{\hat{T} = P_{\text{wait}} + P_{\text{reserve}} + P_{\text{copy}} + C_{\text{roofline}} + S_{\text{stall}} + S_{\text{sync}} + S_{\text{copy}} + c_{\text{launch}}}$$
-
-The blocked-cycle term $T_{\text{blocked}} \times w_{\text{blocked}}$ is also available but is **disabled by default** ($w_{\text{blocked}} = 0$).
-Enabling it leaks observed duration directly into the prediction and reduces explainability. It should only be used for diagnostic ablation.
-
----
-
-## Reading the Output
-
-Running `tt-lang-sim-cycles trace.jsonl` prints three sections.
-
-### Per-kernel table
+`tt-lang-sim-cycles` post-processes a `tt-lang-sim --trace` JSONL file and predicts each kernel's cycle count as an **additive sum of trace-derived terms**:
 
 ```
-Kernel                       Role       Measured  Estimated     Err%     Eff   M-Eff       OI Bound
-node0-compute                compute         288     300.00     4.17    0.01    0.01      inf compute-bound
-node0-read                   read            191     181.00    -5.24    0.04    0.04     0.00 memory-bound
-node0-write                  write           350     361.00     3.14    0.01    0.01     0.00 memory-bound
+estimate = dfb_wait_dur + dfb_reserve_dur + copy_du(phase durations, from trace ticks)
+         + roofline_base (max of compute / memory ceiling)
+         + stall + sync + copy_overhead + blocked + launch (per-event overheads)
 ```
 
-| Column | Meaning |
-|--------|---------|
-| `Measured` | Ground-truth ticks from the trace ($T_{\text{measured}}$) |
-| `Estimated` | Model prediction ($\hat{T}$) |
-| `Err%` | Signed error: positive means the model over-predicts |
-| `Eff` | Roofline efficiency of the estimate: $\min(1, C_{\text{roofline}} / \hat{T})$ |
-| `M-Eff` | Roofline efficiency of the measured cycles |
-| `OI` | Operational intensity: $\text{flops} / \text{bytes\_moved}$ |
-| `Bound` | `compute-bound` or `memory-bound` (ties fall to `memory-bound`) |
-
-A negative `Err%` means the model under-predicted (estimated fewer cycles than observed). A low `Eff` value means the dominant cost is stall or sync overhead, not compute or memory throughput.
-
-Below the table the report prints the overall Weighted Absolute Percentage Error (WAPE), which weights each kernel's error by its measured cycle count so heavier kernels influence the summary more than lightweight ones:
-
-$$\text{WAPE} = \frac{\sum_{i} |\hat{T}_i - T_i|}{\sum_{i} T_i} \times 100 \quad (T_i > 0)$$
-
-### Kernel-group totals
-
-Kernels are grouped by node. The group estimate uses a heuristic critical-path aggregation that avoids naively summing fully overlappable read/compute/write phases:
-
-$$\hat{T}_{\text{group}} = \max_{k \in \text{group}}(\hat{T}_k - S_{\text{sync},k}) + \max_{k \in \text{group}}(S_{\text{sync},k})$$
-
-The group `Err%` is the signed error of the group estimate against the highest measured per-kernel cycle count within the group, which approximates the node's critical-path latency.
-
-### Diagnostics section
-
-The report ends with three diagnostic blocks:
-
-- **Ablation diagnostics** show how much the blocked-cycle term contributes to the estimate. When `blocked_cycle_weight = 0` (the default), the full-model WAPE and the no-blocked-term WAPE are identical, confirming the estimate is driven entirely by trace event metadata:
-
-  ```
-  Ablation Diagnostics (internal)
-  - Full model WAPE%: 4.48
-  - No-blocked-term WAPE%: 4.48
-  - Blocked term share of estimated cycles %: 0.00
-  ```
-
-- **Feature provenance** shows where each feature comes from — ground-truth trace, derived, or config — so the estimate remains fully auditable.
-
-- **Calibration suggestions** print a recommended scale factor per role. These are derived from the ratio of measured cycles to the current non-blocked estimate:
-
-  $$\hat{s}_{\text{role}} = \frac{\sum_{i \in \text{role}} T_i}{\sum_{i \in \text{role}} (\hat{T}_i - T_{\text{blocked},i} \cdot w_{\text{blocked}})}$$
-
-  A value above 1.0 means the model under-predicts that role; below 1.0 means it over-predicts. Pass the suggested value to the corresponding `--*-block-scale` flag to improve accuracy for that role.
+Pipeline: `parse_trace → extract_kernel_features → estimate_kernel_cycles → group_kernel_estimates → report`.
+Constants (`flops_per_tile`, `peak_flops_per_cycle`, per-event costs, scale factors) live in `EstimatorConfig` and are hand-set placeholders.
 
 ---
 
-## Mismatch Analysis
+## 2. Why restructure instead of patch
 
-For each kernel above the mismatch threshold (`--mismatch-threshold-pct`, default 20%), the estimator assigns a reason code and decides whether to recommend escalation to a lower-level model.
+Three reasons — each a property of the design, not a tuning error:
 
-The reason codes and their priority order are:
+1. **The prediction target is logical ticks, not cycles.**
+  The simulator `tick` increments `+1` per scheduler activation that makes progress (`greenlet_scheduler.py`) — a fairness/ ordering counter, not time. `measured_cycles = kernel_end.tick − kernel_start.tick` counts scheduler turns.
+  A "phase-only" estimate reconstructs it at ~0% WAPE, which only proves the model sums sub-intervals back into the whole — tautological, and meaningless as a hardware predictor.
 
-| Reason | Condition | Action |
-|--------|-----------|--------|
-| `within-threshold` | $\text{abs\_err} \leq \tau$ | None required |
-| `stall-dominated` | $T_{\text{blocked}} / T_{\text{measured}} \geq 0.30$ | Refine wait/sync model first; do not escalate yet |
-| `blocked-term-dominated` | blocked term $/ \hat{T} \geq 0.50$ | Audit `blocked_cycle_weight`; do not escalate yet |
-| `unknown-kernel-role` | role is `other` | Add semantic role tagging to the kernel |
-| `no work signal in trace` | no tile counts in trace | Add op-level counters to the trace |
-| `roofline-parameter mismatch` | none of the above | Tune roofline parameters or escalate |
+2. **The combiner double-counts.**
+  Roofline is added *on top of* phase durations that already cover the same work; when work overlaps, the sum over-predicts (up to ~30× on small traces). The correct operator is `max`, not `+` — a structural change.
 
-The `needs_lower_level_model` flag is set **only** when both conditions hold:
+3. **The constants have no hardware basis.**
+  `flops_per_tile=2048`, `peak_flops_per_cycle=4096`, etc. are placeholders; the supporting machinery (`role_calibration_suggestions`, `ablation_metrics`) exists only to fit/diagnose the logical-tick target.
 
-$$\text{abs\_err} > \tau \quad \text{and} \quad \text{reason} = \texttt{roofline-parameter mismatch}$$
-
-This gate prevents premature escalation to Tensix-level modeling when the root cause is a stall pattern or missing trace signal that can be resolved at the current modeling level.
+Target, combiner, and constants are all wrong. That is a restructure.
 
 ---
 
-## Configuration Reference
+## 3. v1.0 Design — analytical peak model
 
-All parameters are set via CLI flags and stored in `EstimatorConfig`. The defaults are shown below.
+**Goal:**
+  Estimate real hardware cycles from *(a) hardware spec profile* and *(b) simulator trace*, assuming the hardware runs at ideal peak performance (no utilization derating).
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--flops-per-tile` | 2048 | Assumed flops per compute tile ($F_{\text{tile}}$) |
-| `--bytes-per-tile` | 2048 | Assumed bytes per memory tile ($B_{\text{tile}}$) |
-| `--peak-flops-per-cycle` | 4096 | Compute roofline peak ($R_{\text{flops}}$) |
-| `--memory-bytes-per-cycle` | 1024 | Memory roofline peak ($R_{\text{bytes}}$) |
-| `--dfb-wait-block-scale` | 1.0 | Scaling factor $s_{\text{wait}}$ |
-| `--dfb-reserve-block-scale` | 1.0 | Scaling factor $s_{\text{reserve}}$ |
-| `--copy-duration-scale` | 1.0 | Scaling factor $s_{\text{copy}}$ |
-| `--wait-event-cycles` | 2.0 | Per-event cost $c_{\text{wait}}$ |
-| `--reserve-event-cycles` | 2.0 | Per-event cost $c_{\text{reserve}}$ |
-| `--sync-event-cycles` | 1.0 | Per-event cost $c_{\text{sync}}$ |
-| `--copy-call-cycles` | 4.0 | Per-event cost $c_{\text{copy}}$ |
-| `--blocked-cycle-weight` | 0.0 | Weight $w_{\text{blocked}}$ (keep at 0 to avoid leakage) |
-| `--kernel-launch-cycles` | 0.0 | Fixed launch overhead $c_{\text{launch}}$ per kernel |
-| `--mismatch-threshold-pct` | 20.0 | Error threshold $\tau$ for mismatch classification |
-| `--json-out` | None | Path for the JSON report |
-| `--include-zero-kernels` | False | Include kernels where both measured and estimated are zero |
+### Inputs
 
----
+- **Hardware spec profile** (`HardwareProfile`):
+  Compute throughput (tiles/cycle by op-type +
+  dtype), NoC bandwidth (bytes/cycle by locality) + per-transfer latency, DRAM bandwidth, engine count, clock.
+- **Simulator trace**:
+  Per-op work-counts (tiles, bytes, locality) and the dependency/overlap **structure** (which kernels block on which DFBs/pipes).
 
-## Implementation Layout
+### Model
 
-The estimator is organized as a package under `python/sim_stats/cycle_tools/`:
+The trace supplies **structure**; it never supplies time. **Tick counts are never multiplied by a rate.** Cycles come from work ÷ rate:
 
-| File | Responsibility |
-|------|----------------|
-| `types.py` | Dataclass definitions (`TraceEvent`, `KernelFeatures`, `EstimatorConfig`, `KernelEstimate`, `KernelGroupEstimate`) |
-| `parse.py` | Trace parsing and feature extraction |
-| `model.py` | Estimation, grouping, and mismatch classification |
-| `report.py` | Terminal and JSON reporting, diagnostics |
-| `cli.py` | Argument parsing and pipeline wiring |
+$$\text{compute op:}\quad cyc = \frac{\text{tiles}}{R_{\text{compute}}(\text{op\_type},\,\text{dtype})}$$
 
-`python/sim_stats/cycle_estimator.py` is a thin compatibility shim that re-exports the public API and preserves the `tt-lang-sim-cycles` entrypoint. Shared trace helpers (JSONL reading, kernel name parsing) live in `python/sim_stats/utils.py` and are reused by both `tt-lang-sim-cycles` and `tt-lang-sim-stats`.
+$$\text{movement op:}\quad cyc = \text{latency} + \frac{\text{bytes}}{R_{\text{noc}}(\text{locality})}$$
+
+Within a kernel, the compute engine and the data-movement engine run concurrently, so the kernel time is the larger of the two serial paths:
+
+$$T_{\text{kernel}} = \max\!\big(\textstyle\sum cyc_{\text{compute}},\; \sum cyc_{\text{movement}}\big)$$
+
+Across kernels, the program time is the critical path through the dependency DAG (edges from `kernel_block.on` + DFB push/pop + pipe send/recv), with each node weighted by `T_kernel`:
+
+$$T_{\text{program}} = \text{critical-path}\big(\text{DAG},\; T_{\text{kernel}}\big)$$
+
+Under ideal-peak, the roofline **is** the estimate (not a lower bound). The model is deterministic from (spec, trace) and needs **no measured-cycle labels** to build or run.
 
 ---
 
-## Known Limitations
+## 4. Architecture & Modules change plan
 
-1. Regression fixtures are not yet formalized. Model outputs should be locked against a reference trace to detect regressions across estimator changes.
-2. Phase-duration scale factors default to 1.0 and have not been hardware-calibrated. Use the calibration suggestions in the report and verify against real device profiles when available.
-3. Read kernels tend to show slightly higher error than compute and write kernels. Tuning `--dfb-reserve-block-scale` is the first step to address this.
-4. The group critical-path aggregation is heuristic. A dependency-graph-aware critical path would improve multi-role overlap accuracy in future iterations.
+The one cross-package dependency is **new compute-op instrumentation in the simulator** — the trace does not currently record math ops at all (only `kernel_*`, `dfb_*`, `copy_*`, `operation_*`). Everything else is contained in `cycle_tools/`.
 
-## Suggested Next Steps
+```
+python/
+├─ sim/                          ← simulator · PRODUCER
+│  ├─ trace.py                   [CHANGE]  register new compute-op event + category (mechanism only)
+│  ├─ math.py                    [ADD]     emit per-op trace event (op_type, dtype, tiles) at op sites
+│  └─ greenlet_scheduler.py      [KEEP]
+│
+└─ sim_stats/                    ← post-processing · CONSUMER · project main dir
+   ├─ __main__.py  (sim-stats)   [KEEP]
+   ├─ utils.py                   [KEEP]
+   ├─ cycle_estimator.py         [CHANGE]  compat shim + console entry; update re-exports
+   └─ cycle_tools/               ← the cycle estimator
+      ├─ parse.py                [CHANGE]  consume op events; demote tick-durations to diagnostics
+      ├─ types.py                [CHANGE]  EstimatorConfig → HardwareProfile; add per-op records
+      ├─ model.py                [REPLACE] additive sum → work÷rate + max / critical-path
+      ├─ hardware.py             [ADD]     peak-rate spec table (Wormhole / Blackhole)
+      ├─ schedule.py             [ADD]     overlap + critical-path combiner
+      ├─ report.py               [TRIM]    drop ablation_metrics + role_calibration; keep per-family/size
+      └─ cli.py                  [CHANGE]  drop tuning flags; add --hw-profile
+```
 
-1. Add fixed-trace regression tests that lock the output schema and WAPE summary.
-2. Collect hardware profiles to calibrate `flops_per_tile`, `bytes_per_tile`, and peak rates for specific device configurations.
-3. Write a calibration guide showing how to use `--json-out` output and the calibration suggestions to iteratively tune scale factors.
-4. Decide on the timeline for slimming or removing the compatibility shim (`sim_stats/cycle_estimator.py`).
+| module | action | detail |
+|---|---|---|
+| `sim/math.py` + `trace.py` | add / change | `math.py`: emit a per-op event (`op_type`, `dtype`, tiles) at each op site. `trace.py`: register the event + category (mechanism only). |
+| `parse.py` | change | build per-op work records and the dependency graph; keep `measured_cycles` and tick-durations **only as diagnostics**. |
+| `types.py` | change | replace `EstimatorConfig` placeholders with `HardwareProfile`; add per-op record types. |
+| `model.py` | replace | `work ÷ rate` per op; `max(compute, movement)` per kernel; remove additive sum, roofline-on-top, stall/sync/blocked terms and `mismatch_reason` escalation. |
+| `schedule.py` | add | dependency-DAG critical-path combiner. |
+| `hardware.py` | add | spec table for the target part. |
+| `report.py` | trim | remove `ablation_metrics` + `role_calibration_suggestions`; per-kernel decomposition + per-family/size reporting. |
+| `cli.py` | change | drop model-tuning flags; add `--hw-profile`. |
+| `cycle_estimator.py` | change | update re-export list (drop `ablation_metrics`, `role_calibration_suggestions`, `mismatch_reason`); keep the `tt-lang-sim-cycles` entry. |
+
+### Trace Instrumentation Detail
+
+- `trace()` is the generic mechanism; instrumentation calls live at the behavior site, exactly as `copy.py`/`dfb.py` do today. The compute-op call therefore belongs in `math.py`, not `trace.py`. `trace.py` only learns the new event name + category.
+- The change is **additive and non-breaking**:
+  Not touch the scheduler tick, so existing events, tick progression, and kernel spans are unchanged; `tt-lang-sim-stats` ignores unknown events; old traces still parse (treated as "no compute term"). Put the new event under its own trace category so it is filterable and trace size stays controllable.
+
+---
+
+## 5. Removed in v1.0
+
+- `EstimatorConfig` tuning knobs: `*_block_scale`, per-event cycle costs, `flops_per_tile`, `peak_flops_per_cycle`, `blocked_cycle_weight`.
+- `report.ablation_metrics`, `report role_calibration_suggestions`.
+- `model.mismatch_reason` escalation gate.
+- The model-tuning CLI flags (already hidden in the current CLI).
+
+---
+
+## 6. Validation approach
+
+Under ideal-peak there are **no hardware labels**, so v1.0 cannot be scored by accuracy. It is validated for correctness, behavior, and sensitivity; accuracy is deferred until profiling data exists.
+
+- **Correctness (regression fixtures):** invariants — `2× tiles → 2× compute cycles`, `estimate ≥ roofline lower bound`, `max(compute, movement) ≤ estimate ≤ compute + movement`, zero work → zero cycles, determinism. Hand-derived cross-checks on simple kernels. Synthetic identifiability (recover known constants from generated labels).
+- **Behavior:** per-kernel decomposition (compute vs movement, dominant term, bound class); coverage across a work-count matrix (compute-bound / memory-bound / mixed / multi-core / pipe),
+  small → large.
+- **Sensitivity:** sweep the hardware spec and confirm estimates/bound-class shift sensibly.
+- **Deferred:** validate against profiled device cycles (tt-metal `ReadDeviceProfilerResults`, PROFILER build); the residual vs ideal-peak is the utilization factor for later non-ideal work.
+
+---
+
+## Open decisions
+
+1. **Target part + spec source** — Wormhole or Blackhole? Peak rates from datasheet or known tt-metal constants? (blocks `hardware.py`)
+2. **Trace instrumentation** — can the simulator emit `op_type` + `dtype` per compute op? (blocks the compute term; gates Phase 0 of validation)
+3. **Overlap model** — confirm `max(compute, movement)` per kernel + critical-path across kernels.
+4. **Scope line** — ideal-peak is the v1.0 deliverable; measured-cycle validation is out of scope until later.
+
+---
+
+## Implementation Checklist
+
+### Trace instrumentation (`python/sim/`)
+- [ ] Register a compute-op event name + category in `trace.py` (`_EVENT_CATEGORY`, `ALL_CATEGORIES`)
+- [ ] Emit the event at op sites in `math.py` with `op_type`, `dtype`, `tiles` (and tile shape)
+- [ ] Confirm instrumentation does not alter tick progression or existing events
+- [ ] Confirm `tt-lang-sim-stats` output is unchanged (unknown event ignored)
+- [ ] New event is under its own trace category (filterable; size control)
+
+### Data model (`cycle_tools/types.py`)
+- [ ] Add `HardwareProfile` (compute rates by op/dtype, NoC bw by locality, latency, clock, engines)
+- [ ] Add per-op work-record type (kind, op_type, dtype, tiles, bytes, locality)
+- [ ] Remove `EstimatorConfig` tuning knobs (scales, per-event costs, flops/bytes, blocked weight)
+- [ ] Keep `measured_cycles` / tick fields only as diagnostics
+
+### Parsing (`cycle_tools/parse.py`)
+- [ ] Consume compute-op events → per-op work records
+- [ ] Reconstruct dependency/overlap structure (`kernel_block.on`, dfb push/pop, pipe send/recv)
+- [ ] Demote tick-duration extraction to diagnostics
+- [ ] Handle old traces without op events gracefully (no compute term + clear note)
+
+### Model & combiner (`cycle_tools/model.py`, `cycle_tools/schedule.py`)
+- [ ] Per-op cost: compute = `tiles / rate`; movement = `latency + bytes / bw`
+- [ ] Kernel cost: `max(compute_path, movement_path)`
+- [ ] Program cost: critical path across kernels over the dependency DAG (`schedule.py`)
+- [ ] Remove additive sum, roofline-on-top, stall/sync/blocked terms
+- [ ] Remove `mismatch_reason` escalation logic
+
+### Hardware profile (`cycle_tools/hardware.py`)
+- [ ] Spec table for the chosen target part (pending decision #1)
+- [ ] Each rate documents its source (datasheet vs known constant)
+
+### Reporting (`cycle_tools/report.py`)
+- [ ] Remove `ablation_metrics` and `role_calibration_suggestions`
+- [ ] Per-kernel decomposition (compute vs movement, dominant term, bound class)
+- [ ] Per-family + per-size reporting (never a single global number)
+- [ ] Update `feature_provenance` to hardware-derived sources
+
+### CLI & entry (`cycle_tools/cli.py`, `cycle_estimator.py`, `cycle_tools/__init__.py`)
+- [ ] Drop model-tuning flags; add `--hw-profile`
+- [ ] Update `cycle_estimator.py` re-exports (drop removed symbols)
+- [ ] Update `cycle_tools/__init__.py` exports
+
+### Validation
+- [ ] Invariant tests (monotonicity, bounds, overlap, determinism, zero-work) as regression fixtures
+- [ ] Hand-derived cross-checks on simple kernels
+- [ ] Synthetic identifiability check
+- [ ] Behavioral coverage across the work-count matrix
+- [ ] Sensitivity sweep over the hardware spec
+- [ ] (Deferred) hardware-profile validation
+
+### Docs
+- [ ] Replace remaining v0.1 user-guide content with the v1.0 model + CLI reference
+- [ ] Document removed flags / breaking changes for users of `tt-lang-sim-cycles`
