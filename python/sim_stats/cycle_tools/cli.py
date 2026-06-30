@@ -32,98 +32,16 @@ def main() -> None:
             "Estimate kernel cycles from a tt-lang simulator trace using a "
             "higher-level roofline-style model."
         ),
+        epilog=(
+            "Advanced model-tuning flags (roofline peaks, per-event costs, "
+            "blocking scales) are hidden from this help; see "
+            "docs/development/CycleEstimator.md."
+        ),
     )
     parser.add_argument(
         "trace",
         metavar="FILE",
         help="JSON Lines trace file produced by tt-lang-sim --trace",
-    )
-    parser.add_argument(
-        "--flops-per-tile",
-        type=float,
-        default=EstimatorConfig.flops_per_tile,
-        help="Model flops per compute tile (default: %(default)s)",
-    )
-    parser.add_argument(
-        "--bytes-per-tile",
-        type=float,
-        default=EstimatorConfig.bytes_per_tile,
-        help="Bytes transferred per tile (default: %(default)s)",
-    )
-    parser.add_argument(
-        "--peak-flops-per-cycle",
-        type=float,
-        default=EstimatorConfig.peak_flops_per_cycle,
-        help="Compute roofline peak in flops/cycle (default: %(default)s)",
-    )
-    parser.add_argument(
-        "--memory-bytes-per-cycle",
-        type=float,
-        default=EstimatorConfig.memory_bytes_per_cycle,
-        help="Memory roofline peak in bytes/cycle (default: %(default)s)",
-    )
-    parser.add_argument(
-        "--wait-event-cycles",
-        type=float,
-        default=EstimatorConfig.wait_event_cycles,
-        help="Cycle cost per dfb_wait_begin event (default: %(default)s)",
-    )
-    parser.add_argument(
-        "--reserve-event-cycles",
-        type=float,
-        default=EstimatorConfig.reserve_event_cycles,
-        help="Cycle cost per dfb_reserve_begin event (default: %(default)s)",
-    )
-    parser.add_argument(
-        "--sync-event-cycles",
-        type=float,
-        default=EstimatorConfig.sync_event_cycles,
-        help="Cycle cost per dfb_push/dfb_pop event (default: %(default)s)",
-    )
-    parser.add_argument(
-        "--copy-call-cycles",
-        type=float,
-        default=EstimatorConfig.copy_call_cycles,
-        help="Cycle cost per copy_end event (default: %(default)s)",
-    )
-    parser.add_argument(
-        "--blocked-cycle-weight",
-        type=float,
-        default=EstimatorConfig.blocked_cycle_weight,
-        help=(
-            "Optional diagnostic weight applied to blocked trace spans; "
-            "keep at 0 to avoid duration leakage (default: %(default)s)"
-        ),
-    )
-    parser.add_argument(
-        "--kernel-launch-cycles",
-        type=float,
-        default=EstimatorConfig.kernel_launch_cycles,
-        help="Fixed launch/scheduler overhead per kernel row (default: %(default)s)",
-    )
-    parser.add_argument(
-        "--dfb-wait-block-scale",
-        type=float,
-        default=EstimatorConfig.dfb_wait_block_scale,
-        help="Scaling factor for dfb_wait blocking durations (default: %(default)s)",
-    )
-    parser.add_argument(
-        "--dfb-reserve-block-scale",
-        type=float,
-        default=EstimatorConfig.dfb_reserve_block_scale,
-        help="Scaling factor for dfb_reserve blocking durations (default: %(default)s)",
-    )
-    parser.add_argument(
-        "--copy-duration-scale",
-        type=float,
-        default=EstimatorConfig.copy_duration_scale,
-        help="Scaling factor for copy_start/copy_end durations (default: %(default)s)",
-    )
-    parser.add_argument(
-        "--mismatch-threshold-pct",
-        type=float,
-        default=EstimatorConfig.mismatch_threshold_pct,
-        help="Threshold for significant mismatch (default: %(default)s)",
     )
     parser.add_argument(
         "--json-out",
@@ -135,6 +53,95 @@ def main() -> None:
         "--include-zero-kernels",
         action="store_true",
         help="Include kernels with both measured and estimated cycles equal to zero",
+    )
+
+    # Advanced model-tuning knobs. Hidden from --help (help=SUPPRESS) so the
+    # common path matches the sibling tt-lang-sim-stats tool; still accepted on
+    # the command line and documented in docs/development/CycleEstimator.md.
+    tuning = parser.add_argument_group("advanced tuning")
+    tuning.add_argument(
+        "--flops-per-tile",
+        type=float,
+        default=EstimatorConfig.flops_per_tile,
+        help=argparse.SUPPRESS,
+    )
+    tuning.add_argument(
+        "--bytes-per-tile",
+        type=float,
+        default=EstimatorConfig.bytes_per_tile,
+        help=argparse.SUPPRESS,
+    )
+    tuning.add_argument(
+        "--peak-flops-per-cycle",
+        type=float,
+        default=EstimatorConfig.peak_flops_per_cycle,
+        help=argparse.SUPPRESS,
+    )
+    tuning.add_argument(
+        "--memory-bytes-per-cycle",
+        type=float,
+        default=EstimatorConfig.memory_bytes_per_cycle,
+        help=argparse.SUPPRESS,
+    )
+    tuning.add_argument(
+        "--wait-event-cycles",
+        type=float,
+        default=EstimatorConfig.wait_event_cycles,
+        help=argparse.SUPPRESS,
+    )
+    tuning.add_argument(
+        "--reserve-event-cycles",
+        type=float,
+        default=EstimatorConfig.reserve_event_cycles,
+        help=argparse.SUPPRESS,
+    )
+    tuning.add_argument(
+        "--sync-event-cycles",
+        type=float,
+        default=EstimatorConfig.sync_event_cycles,
+        help=argparse.SUPPRESS,
+    )
+    tuning.add_argument(
+        "--copy-call-cycles",
+        type=float,
+        default=EstimatorConfig.copy_call_cycles,
+        help=argparse.SUPPRESS,
+    )
+    tuning.add_argument(
+        "--blocked-cycle-weight",
+        type=float,
+        default=EstimatorConfig.blocked_cycle_weight,
+        help=argparse.SUPPRESS,
+    )
+    tuning.add_argument(
+        "--kernel-launch-cycles",
+        type=float,
+        default=EstimatorConfig.kernel_launch_cycles,
+        help=argparse.SUPPRESS,
+    )
+    tuning.add_argument(
+        "--dfb-wait-block-scale",
+        type=float,
+        default=EstimatorConfig.dfb_wait_block_scale,
+        help=argparse.SUPPRESS,
+    )
+    tuning.add_argument(
+        "--dfb-reserve-block-scale",
+        type=float,
+        default=EstimatorConfig.dfb_reserve_block_scale,
+        help=argparse.SUPPRESS,
+    )
+    tuning.add_argument(
+        "--copy-duration-scale",
+        type=float,
+        default=EstimatorConfig.copy_duration_scale,
+        help=argparse.SUPPRESS,
+    )
+    tuning.add_argument(
+        "--mismatch-threshold-pct",
+        type=float,
+        default=EstimatorConfig.mismatch_threshold_pct,
+        help=argparse.SUPPRESS,
     )
     args = parser.parse_args()
 
@@ -168,12 +175,7 @@ def main() -> None:
 
     if args.json_out is not None:
         out_path = args.json_out.resolve()
-        if not out_path.parent.exists():
-            print(
-                f"Error: output directory does not exist: {out_path.parent}",
-                file=sys.stderr,
-            )
-            sys.exit(1)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
         groups = group_kernel_estimates(rows)
         write_json_report(out_path, rows, groups, config)
         print(f"\nWrote JSON report: {out_path}")

@@ -129,6 +129,9 @@ class HardwareProfile:
     noc_latency: dict[str, float]
     # Core clock in GHz; used only for cycle<->ns reporting, never in the model.
     clock_ghz: float
+    # Bytes per tile for the movement term (provisional; dtype-dependent, e.g.
+    # bf16 tile = 32*32*2 = 2048 B). Refined to per-dtype sizing when op events land.
+    bytes_per_tile: float
     # Number of data-movement engines (reserved for future overlap modelling).
     dm_engines: int = 1
 
@@ -152,8 +155,7 @@ class OpWork:
     kind: str  # "compute" | "movement"
     op_type: str  # e.g. "matmul", "add", "exp", "copy"
     dtype: str = ""  # e.g. "bf16", "fp32" (compute ops)
-    tiles: int = 0  # compute work
-    bytes: int = 0  # movement work
+    tiles: int = 0  # work in tiles (compute tiles, or tiles moved)
     locality: str = ""  # "local_l1" | "remote_l1" | "dram" (movement ops)
 
 

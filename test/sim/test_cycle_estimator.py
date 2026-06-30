@@ -19,11 +19,22 @@ from python.sim_stats.cycle_tools.model import (
     group_kernel_estimates,
     mismatch_reason,
 )
-from python.sim_stats.cycle_tools.parse import extract_kernel_features
+from python.sim_stats.cycle_tools.parse import (
+    extract_kernel_features,
+    extract_kernel_work,
+)
+from python.sim_stats.cycle_tools.schedule import (
+    kernel_cycles,
+    op_cycles,
+    program_cycles,
+)
 from python.sim_stats.cycle_tools.types import (
     EstimatorConfig,
+    HardwareProfile,
     KernelEstimate,
     KernelFeatures,
+    KernelWork,
+    OpWork,
 )
 from python.sim_stats.cycle_tools.types import TraceEvent
 
@@ -38,7 +49,9 @@ def test_zero_kernels_filtered_by_default() -> None:
         "node0-compute": KernelFeatures(kernel="node0-compute", role="compute"),
     }
 
-    rows = estimate_kernel_cycles(features, EstimatorConfig(), include_zero_kernels=False)
+    rows = estimate_kernel_cycles(
+        features, EstimatorConfig(), include_zero_kernels=False
+    )
 
     assert rows == []
 
@@ -48,7 +61,9 @@ def test_zero_kernels_included_when_enabled() -> None:
         "node0-compute": KernelFeatures(kernel="node0-compute", role="compute"),
     }
 
-    rows = estimate_kernel_cycles(features, EstimatorConfig(), include_zero_kernels=True)
+    rows = estimate_kernel_cycles(
+        features, EstimatorConfig(), include_zero_kernels=True
+    )
 
     assert len(rows) == 1
     assert rows[0].measured_cycles == 0
@@ -285,3 +300,87 @@ def test_extract_features_ignores_unpaired_phase_begin_events() -> None:
     assert f.dfb_wait_block_cycles == 0
     assert f.dfb_reserve_block_cycles == 0
     assert f.copy_duration_cycles == 0
+
+
+# ---------------------------------------------------------------------------
+# v1.0 analytical peak model (Step 2: movement path)
+# ---------------------------------------------------------------------------
+
+
+def _hw() -> HardwareProfile:
+    """Deterministic test profile (zero latency for clean arithmetic)."""
+    return HardwareProfile(
+        name="test",
+        compute_rate={("matmul", "bf16"): 2.0},
+        compute_rate_default=1.0,
+        noc_bw={"local_l1": 8.0, "remote_l1": 4.0, "dram": 2.0},
+        noc_latency={"local_l1": 0.0, "remote_l1": 0.0, "dram": 0.0},
+        clock_ghz=1.0,
+        bytes_per_tile=2.0,
+    )
+
+
+def test_extract_kernel_work_emits_movement_op_per_locality() -> None:
+    events = [
+        TraceEvent(0, "kernel_start", "node0-read", {}),
+        TraceEvent(
+            5,
+            "copy_end",
+            "node0-read",
+            {"tiles": 4, "local_l1": 1, "remote_l1": 2, "dram": 1},
+        ),
+        TraceEvent(6, "kernel_end", "node0-read", {}),
+    ]
+
+    work = extract_kernel_work(events)
+    kw = work["node0-read"]
+
+    assert kw.node_index == 0
+    assert [(o.locality, o.tiles) for o in kw.ops] == [
+        ("local_l1", 1),
+        ("remote_l1", 2),
+        ("dram", 1),
+    ]
+    assert all(o.kind == "movement" for o in kw.ops)
+
+
+def test_movement_op_cost_is_tiles_times_bytes_over_bandwidth() -> None:
+    hw = _hw()
+    op = OpWork(kind="movement", op_type="copy", tiles=4, locality="dram")
+    # bytes = 4 tiles * 2 B/tile = 8; bw(dram) = 2 -> 4.0 cycles
+    assert op_cycles(op, hw) == 4.0
+
+
+def test_movement_cost_monotonic_in_tiles() -> None:
+    hw = _hw()
+    one = op_cycles(
+        OpWork(kind="movement", op_type="copy", tiles=4, locality="dram"), hw
+    )
+    two = op_cycles(
+        OpWork(kind="movement", op_type="copy", tiles=8, locality="dram"), hw
+    )
+    assert two == 2 * one
+
+
+def test_kernel_cycles_is_max_of_compute_and_movement_paths() -> None:
+    hw = _hw()
+    kw = KernelWork(
+        kernel="node0-compute",
+        ops=[
+            OpWork(
+                kind="compute", op_type="matmul", dtype="bf16", tiles=10
+            ),  # 10/2 = 5
+            OpWork(
+                kind="movement", op_type="copy", tiles=4, locality="dram"
+            ),  # 8/2 = 4
+        ],
+    )
+    # max(compute_path=5, movement_path=4) = 5
+    assert kernel_cycles(kw, hw) == 5.0
+
+
+def test_zero_work_zero_cycles() -> None:
+    hw = _hw()
+    kw = KernelWork(kernel="node0-compute")
+    assert kernel_cycles(kw, hw) == 0.0
+    assert program_cycles([kw], hw) == 0.0

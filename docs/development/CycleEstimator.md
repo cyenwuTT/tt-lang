@@ -158,15 +158,16 @@ Under ideal-peak there are **no hardware labels**, so v1.0 cannot be scored by a
 
 ### Data model (`cycle_tools/types.py`)
 - [x] Add `HardwareProfile` (compute rates by op/dtype, NoC bw by locality, latency, clock, engines)
-- [x] Add per-op work-record type `OpWork` + `KernelWork` container (kind, op_type, dtype, tiles, bytes, locality)
+- [x] Add per-op work-record type `OpWork` + `KernelWork` container (kind, op_type, dtype, tiles, locality)
 - [ ] Remove `EstimatorConfig` tuning knobs (scales, per-event costs, flops/bytes, blocked weight)
 - [ ] Keep `measured_cycles` / tick fields only as diagnostics
 
 ### Parsing (`cycle_tools/parse.py`)
-- [ ] Consume compute-op events → per-op work records
+- [x] Movement work records from `copy_end` localities (`extract_kernel_work`, alongside v0.1)
+- [x] Handle traces without compute-op events gracefully (movement-only, empty compute path)
+- [ ] Consume compute-op events → per-op work records (blocked on sim instrumentation)
 - [ ] Reconstruct dependency/overlap structure (`kernel_block.on`, dfb push/pop, pipe send/recv)
 - [ ] Demote tick-duration extraction to diagnostics
-- [ ] Handle old traces without op events gracefully (no compute term + clear note)
 
 ### Model & combiner (`cycle_tools/model.py`, `cycle_tools/schedule.py`)
 - [x] Per-op cost: compute = `tiles / rate`; movement = `latency + bytes / bw` (`schedule.op_cycles`)

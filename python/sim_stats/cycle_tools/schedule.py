@@ -26,7 +26,8 @@ def op_cycles(op: OpWork, hw: HardwareProfile) -> float:
         return op.tiles / rate if rate > 0.0 else 0.0
     if op.kind == "movement":
         bw = hw.bandwidth_for(op.locality)
-        transfer = op.bytes / bw if bw > 0.0 else 0.0
+        moved_bytes = op.tiles * hw.bytes_per_tile
+        transfer = moved_bytes / bw if bw > 0.0 else 0.0
         return hw.latency_for(op.locality) + transfer
     return 0.0
 

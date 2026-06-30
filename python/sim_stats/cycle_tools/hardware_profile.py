@@ -28,6 +28,7 @@ WORMHOLE_B0 = HardwareProfile(
     noc_bw={"local_l1": 1.0, "remote_l1": 1.0, "dram": 1.0},  # placeholder
     noc_latency={"local_l1": 0.0, "remote_l1": 0.0, "dram": 0.0},  # placeholder
     clock_ghz=1.0,  # placeholder
+    bytes_per_tile=2048.0,  # placeholder (bf16 tile = 32*32*2 B)
 )
 
 _PROFILES: dict[str, HardwareProfile] = {

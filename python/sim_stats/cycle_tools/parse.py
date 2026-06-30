@@ -8,7 +8,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from .types import KernelFeatures, TraceEvent
+from .types import KernelFeatures, KernelWork, OpWork, TraceEvent
 from ..utils import as_int, iter_events, node_from_kernel
 
 
@@ -26,16 +26,14 @@ def parse_trace(path: Path) -> list[TraceEvent]:
         kernel_obj = obj.get("kernel")
         kernel = str(kernel_obj) if kernel_obj is not None else None
         data = {
-            k: v
-            for k, v in obj.items()
-            if k not in {"tick", "event", "kernel", "node"}
+            k: v for k, v in obj.items() if k not in {"tick", "event", "kernel", "node"}
         }
-        
+
         if "node" in obj:
             data["node"] = obj["node"]
 
         events.append(TraceEvent(tick=tick, event=event, kernel=kernel, data=data))
-    
+
     return events
 
 
@@ -52,27 +50,29 @@ def extract_kernel_features(events: list[TraceEvent]) -> dict[str, KernelFeature
     for ev in events:
         max_tick = max(max_tick, ev.tick)
         kernel = ev.kernel
-        
+
         if not kernel:
             continue
 
         feature = features.get(kernel)
-        
+
         if feature is None:
             node = node_from_kernel(kernel)
             suffix = kernel.removeprefix(f"{node}-") if node != kernel else ""
             role = suffix if suffix in {"compute", "read", "write"} else "other"
-            
+
             try:
                 node_idx = int(node.replace("node", ""))
             except (ValueError, AttributeError):
                 node_idx = 0
-            
+
             feature = KernelFeatures(kernel=kernel, role=role, node_index=node_idx)
             features[kernel] = feature
 
         if ev.event == "kernel_start":
-            open_states.setdefault(kernel, []).append(_OpenKernelState(start_tick=ev.tick))
+            open_states.setdefault(kernel, []).append(
+                _OpenKernelState(start_tick=ev.tick)
+            )
             continue
 
         if ev.event == "kernel_end":
@@ -105,7 +105,9 @@ def extract_kernel_features(events: list[TraceEvent]) -> dict[str, KernelFeature
         if ev.event == "dfb_wait_end":
             feature.wait_tiles += as_int(ev.data.get("tiles", 0))
             if kernel in dfb_wait_starts:
-                feature.dfb_wait_block_cycles += max(0, ev.tick - dfb_wait_starts[kernel])
+                feature.dfb_wait_block_cycles += max(
+                    0, ev.tick - dfb_wait_starts[kernel]
+                )
                 del dfb_wait_starts[kernel]
             continue
 
@@ -117,7 +119,9 @@ def extract_kernel_features(events: list[TraceEvent]) -> dict[str, KernelFeature
         if ev.event == "dfb_reserve_end":
             feature.reserve_tiles += as_int(ev.data.get("tiles", 0))
             if kernel in dfb_reserve_starts:
-                feature.dfb_reserve_block_cycles += max(0, ev.tick - dfb_reserve_starts[kernel])
+                feature.dfb_reserve_block_cycles += max(
+                    0, ev.tick - dfb_reserve_starts[kernel]
+                )
                 del dfb_reserve_starts[kernel]
             continue
 
@@ -152,7 +156,7 @@ def extract_kernel_features(events: list[TraceEvent]) -> dict[str, KernelFeature
     for kernel, stack in open_states.items():
         feature = features.get(kernel)
         assert feature is not None
-        
+
         for st in stack:
             if st.block_start_tick is not None:
                 feature.blocked_cycles += max(0, max_tick - st.block_start_tick)
@@ -163,3 +167,47 @@ def extract_kernel_features(events: list[TraceEvent]) -> dict[str, KernelFeature
         feature.active_cycles = max(0, feature.measured_cycles - feature.blocked_cycles)
 
     return features
+
+
+def extract_kernel_work(events: list[TraceEvent]) -> dict[str, KernelWork]:
+    """Build per-kernel v1.0 work records from trace events.
+
+    Step 2 of the v0.1 -> v1.0 restructure (Parallel Change / expand phase):
+    movement ops only, derived from the per-locality tile counts on ``copy_end``.
+    Compute ops are added once the simulator emits per-op events (Step 4); until
+    then the compute path is empty and the estimate is movement-only.
+
+    This runs *alongside* :func:`extract_kernel_features`; it does not replace it.
+    """
+    work: dict[str, KernelWork] = {}
+
+    for ev in events:
+        kernel = ev.kernel
+        if not kernel:
+            continue
+
+        kw = work.get(kernel)
+        if kw is None:
+            node = node_from_kernel(kernel)
+            try:
+                node_idx = int(node.replace("node", ""))
+            except (ValueError, AttributeError):
+                node_idx = 0
+            kw = KernelWork(kernel=kernel, node_index=node_idx)
+            work[kernel] = kw
+
+        if ev.event == "copy_end":
+            # One movement op per locality with a non-zero tile count.
+            for locality in ("local_l1", "remote_l1", "dram"):
+                tiles = as_int(ev.data.get(locality, 0))
+                if tiles > 0:
+                    kw.ops.append(
+                        OpWork(
+                            kind="movement",
+                            op_type="copy",
+                            tiles=tiles,
+                            locality=locality,
+                        )
+                    )
+
+    return work
