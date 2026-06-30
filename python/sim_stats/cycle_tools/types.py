@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 
@@ -53,7 +53,7 @@ class EstimatorConfig:
     copy_call_cycles: float = 4.0
     blocked_cycle_weight: float = 0.0  # Keep at 0 to prevent leakage into predictions.
     kernel_launch_cycles: float = 0.0
-    
+
     # Phase-duration scaling coefficients.
     dfb_wait_block_scale: float = 1.0
     dfb_reserve_block_scale: float = 1.0
@@ -81,7 +81,7 @@ class KernelEstimate:
     copy_overhead_cycles: float
     blocked_cycles_term: float
     launch_cycles: float
-    
+
     # Phase-duration contributions captured in the estimate.
     dfb_wait_block_contribution: float
     dfb_reserve_block_contribution: float
@@ -99,3 +99,70 @@ class KernelGroupEstimate:
     abs_error_pct: float
     signed_error_pct: float
     aggregation_model: str
+
+
+# ---------------------------------------------------------------------------
+# v1.0 analytical peak model (scaffolding; not yet wired into the pipeline)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class HardwareProfile:
+    """Static hardware spec rates for the analytical peak model.
+
+    Holds peak throughput/bandwidth constants that cannot be derived from a
+    trace (the trace says *how much* work happens, not *how fast* the part runs).
+    Canonical profiles live in ``hardware_profile.py`` and are looked up by name.
+    A file-based loader for custom profiles is deferred until the field set is
+    settled and sensitivity sweeps actually need it.
+    """
+
+    name: str
+    # Compute throughput in tiles/cycle, keyed by (op_type, dtype).
+    compute_rate: dict[tuple[str, str], float]
+    # Fallback tiles/cycle when an (op_type, dtype) pair is not listed.
+    compute_rate_default: float
+    # Data-movement bandwidth in bytes/cycle, keyed by locality
+    # ("local_l1", "remote_l1", "dram").
+    noc_bw: dict[str, float]
+    # Per-transfer fixed latency in cycles, keyed by locality.
+    noc_latency: dict[str, float]
+    # Core clock in GHz; used only for cycle<->ns reporting, never in the model.
+    clock_ghz: float
+    # Number of data-movement engines (reserved for future overlap modelling).
+    dm_engines: int = 1
+
+    def rate_for(self, op_type: str, dtype: str) -> float:
+        """Peak tiles/cycle for an (op_type, dtype), falling back to the default."""
+        return self.compute_rate.get((op_type, dtype), self.compute_rate_default)
+
+    def bandwidth_for(self, locality: str) -> float:
+        """Peak bytes/cycle for a locality, or 0.0 if unknown."""
+        return self.noc_bw.get(locality, 0.0)
+
+    def latency_for(self, locality: str) -> float:
+        """Fixed per-transfer latency in cycles for a locality, or 0.0 if unknown."""
+        return self.noc_latency.get(locality, 0.0)
+
+
+@dataclass(frozen=True)
+class OpWork:
+    """A single operation extracted from the trace (v1.0 per-op work record)."""
+
+    kind: str  # "compute" | "movement"
+    op_type: str  # e.g. "matmul", "add", "exp", "copy"
+    dtype: str = ""  # e.g. "bf16", "fp32" (compute ops)
+    tiles: int = 0  # compute work
+    bytes: int = 0  # movement work
+    locality: str = ""  # "local_l1" | "remote_l1" | "dram" (movement ops)
+
+
+@dataclass
+class KernelWork:
+    """Per-kernel collection of op records plus dependency structure (v1.0)."""
+
+    kernel: str
+    node_index: int = 0
+    ops: list[OpWork] = field(default_factory=list[OpWork])
+    # DFB / pipe names this kernel blocks on; filled by the dependency pass.
+    blocks_on: list[str] = field(default_factory=list[str])

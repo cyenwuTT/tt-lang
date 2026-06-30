@@ -1,9 +1,6 @@
 # Cycle Estimator — v1.0 Restructure (Development Plan)
 
-**Status:** v0.1 is being replaced, not extended. v0.1 predicts a *logical-time* signal, not
-hardware cycles; no weight tuning fixes that. v1.0 re-bases the estimator on an analytical
-peak-performance model. This document is the development reference and tracking checklist for
-the v0.1 → v1.0 restructure. The self-check checklist is at the end.
+**Status:** v0.1 is being replaced, not extended. v0.1 predicts a *logical-time* signal, not hardware cycles; no weight tuning fixes that. v1.0 re-bases the estimator on an analytical peak-performance model. This document is the development reference and tracking checklist for the v0.1 → v1.0 restructure. The self-check checklist is at the end.
 
 For the current (v0.1) source layout see `python/sim_stats/cycle_tools/`.
 
@@ -94,7 +91,7 @@ python/
       ├─ parse.py                [CHANGE]  consume op events; demote tick-durations to diagnostics
       ├─ types.py                [CHANGE]  EstimatorConfig → HardwareProfile; add per-op records
       ├─ model.py                [REPLACE] additive sum → work÷rate + max / critical-path
-      ├─ hardware.py             [ADD]     peak-rate spec table (Wormhole / Blackhole)
+      ├─ hardware_profile.py     [ADD]     peak-rate spec table (Wormhole / Blackhole), named registry
       ├─ schedule.py             [ADD]     overlap + critical-path combiner
       ├─ report.py               [TRIM]    drop ablation_metrics + role_calibration; keep per-family/size
       └─ cli.py                  [CHANGE]  drop tuning flags; add --hw-profile
@@ -107,7 +104,7 @@ python/
 | `types.py` | change | replace `EstimatorConfig` placeholders with `HardwareProfile`; add per-op record types. |
 | `model.py` | replace | `work ÷ rate` per op; `max(compute, movement)` per kernel; remove additive sum, roofline-on-top, stall/sync/blocked terms and `mismatch_reason` escalation. |
 | `schedule.py` | add | dependency-DAG critical-path combiner. |
-| `hardware.py` | add | spec table for the target part. |
+| `hardware_profile.py` | add | typed `HardwareProfile` registry of built-in parts (source of truth), looked up by name. File-based loader for custom specs deferred until the field set settles and sweeps need it. |
 | `report.py` | trim | remove `ablation_metrics` + `role_calibration_suggestions`; per-kernel decomposition + per-family/size reporting. |
 | `cli.py` | change | drop model-tuning flags; add `--hw-profile`. |
 | `cycle_estimator.py` | change | update re-export list (drop `ablation_metrics`, `role_calibration_suggestions`, `mismatch_reason`); keep the `tt-lang-sim-cycles` entry. |
@@ -143,7 +140,7 @@ Under ideal-peak there are **no hardware labels**, so v1.0 cannot be scored by a
 
 ## Open decisions
 
-1. **Target part + spec source** — Wormhole or Blackhole? Peak rates from datasheet or known tt-metal constants? (blocks `hardware.py`)
+1. **Target part + spec source** — Wormhole or Blackhole? Peak rates from datasheet or known tt-metal constants? (blocks `hardware_profile.py`)
 2. **Trace instrumentation** — can the simulator emit `op_type` + `dtype` per compute op? (blocks the compute term; gates Phase 0 of validation)
 3. **Overlap model** — confirm `max(compute, movement)` per kernel + critical-path across kernels.
 4. **Scope line** — ideal-peak is the v1.0 deliverable; measured-cycle validation is out of scope until later.
@@ -160,8 +157,8 @@ Under ideal-peak there are **no hardware labels**, so v1.0 cannot be scored by a
 - [ ] New event is under its own trace category (filterable; size control)
 
 ### Data model (`cycle_tools/types.py`)
-- [ ] Add `HardwareProfile` (compute rates by op/dtype, NoC bw by locality, latency, clock, engines)
-- [ ] Add per-op work-record type (kind, op_type, dtype, tiles, bytes, locality)
+- [x] Add `HardwareProfile` (compute rates by op/dtype, NoC bw by locality, latency, clock, engines)
+- [x] Add per-op work-record type `OpWork` + `KernelWork` container (kind, op_type, dtype, tiles, bytes, locality)
 - [ ] Remove `EstimatorConfig` tuning knobs (scales, per-event costs, flops/bytes, blocked weight)
 - [ ] Keep `measured_cycles` / tick fields only as diagnostics
 
@@ -172,15 +169,17 @@ Under ideal-peak there are **no hardware labels**, so v1.0 cannot be scored by a
 - [ ] Handle old traces without op events gracefully (no compute term + clear note)
 
 ### Model & combiner (`cycle_tools/model.py`, `cycle_tools/schedule.py`)
-- [ ] Per-op cost: compute = `tiles / rate`; movement = `latency + bytes / bw`
-- [ ] Kernel cost: `max(compute_path, movement_path)`
-- [ ] Program cost: critical path across kernels over the dependency DAG (`schedule.py`)
+- [x] Per-op cost: compute = `tiles / rate`; movement = `latency + bytes / bw` (`schedule.op_cycles`)
+- [x] Kernel cost: `max(compute_path, movement_path)` (`schedule.kernel_cycles`)
+- [ ] Program cost: critical path across kernels over the dependency DAG (`schedule.py` — placeholder only)
 - [ ] Remove additive sum, roofline-on-top, stall/sync/blocked terms
 - [ ] Remove `mismatch_reason` escalation logic
 
-### Hardware profile (`cycle_tools/hardware.py`)
-- [ ] Spec table for the chosen target part (pending decision #1)
+### Hardware profile (`cycle_tools/hardware_profile.py`)
+- [x] Add `HardwareProfile` named registry (`get_profile`, scaffold, provisional rates)
+- [ ] Fill the spec table for the chosen target part (pending decision #1)
 - [ ] Each rate documents its source (datasheet vs known constant)
+- [ ] Custom-profile file loader (deferred until field set settles / sweeps need it)
 
 ### Reporting (`cycle_tools/report.py`)
 - [ ] Remove `ablation_metrics` and `role_calibration_suggestions`
