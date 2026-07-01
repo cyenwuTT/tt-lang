@@ -446,6 +446,42 @@ def test_kernel_cycles_deterministic() -> None:
     assert kernel_cycles(kw, hw) == kernel_cycles(kw, hw)
 
 
+def test_program_cycles_is_max_across_parallel_nodes() -> None:
+    # Distinct nodes are separate cores running in parallel -> max, not sum.
+    hw = _hw()
+    kernels = [
+        KernelWork(
+            kernel="node0-compute",
+            ops=[OpWork(kind="compute", op_type="matmul", dtype="bf16", tiles=10)],
+        ),  # 5
+        KernelWork(
+            kernel="node1-compute",
+            ops=[OpWork(kind="compute", op_type="matmul", dtype="bf16", tiles=16)],
+        ),  # 8
+    ]
+    assert program_cycles(kernels, hw) == 8.0  # max(5, 8), not 13
+
+
+def test_program_cycles_within_node_is_max_of_kernels() -> None:
+    # Reader / compute / writer share one core's concurrent RISCs -> max.
+    hw = _hw()
+    kernels = [
+        KernelWork(
+            kernel="node0-read",
+            ops=[OpWork(kind="movement", op_type="copy", tiles=4, locality="dram")],
+        ),  # 4
+        KernelWork(
+            kernel="node0-compute",
+            ops=[OpWork(kind="compute", op_type="matmul", dtype="bf16", tiles=10)],
+        ),  # 5
+        KernelWork(
+            kernel="node0-write",
+            ops=[OpWork(kind="movement", op_type="copy", tiles=2, locality="dram")],
+        ),  # 2
+    ]
+    assert program_cycles(kernels, hw) == 5.0  # max(4, 5, 2)
+
+
 def test_program_cycles_bounded_by_max_and_sum_of_kernels() -> None:
     # Bound holds for the current per-node-max placeholder AND the future
     # dependency-DAG critical path (Step 5): a program can be no faster than its

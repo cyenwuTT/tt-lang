@@ -64,9 +64,11 @@ Within a kernel, the compute engine and the data-movement engine run concurrentl
 
 $$T_{\text{kernel}} = \max\!\big(\textstyle\sum cyc_{\text{compute}},\; \sum cyc_{\text{movement}}\big)$$
 
-Across kernels, the program time is the critical path through the dependency DAG (edges from `kernel_block.on` + DFB push/pop + pipe send/recv), with each node weighted by `T_kernel`:
+Across kernels, under ideal-peak the program is **throughput-bound by its slowest kernel**: distinct nodes are separate cores running in parallel, and within a node the reader/compute/writer kernels share that core's concurrent RISCs. So the program time is the max over nodes of each node's max kernel:
 
-$$T_{\text{program}} = \text{critical-path}\big(\text{DAG},\; T_{\text{kernel}}\big)$$
+$$T_{\text{program}} = \max_{\text{node}} \; \max_{k \in \text{node}} T_{\text{kernel}}(k)$$
+
+Fill/drain latency and explicit cross-node serialization (the *latency* regime, needing the dependency DAG from `kernel_block.on` / dfb push-pop / pipe send-recv) are deferred.
 
 Under ideal-peak, the roofline **is** the estimate (not a lower bound). The model is deterministic from (spec, trace) and needs **no measured-cycle labels** to build or run.
 
@@ -90,9 +92,9 @@ python/
    └─ cycle_tools/               ← the cycle estimator
       ├─ parse.py                [CHANGE]  consume op events; demote tick-durations to diagnostics
       ├─ types.py                [CHANGE]  EstimatorConfig → HardwareProfile; add per-op records
-      ├─ model.py                [REPLACE] additive sum → work÷rate + max / critical-path
+      ├─ model.py                [REPLACE] additive sum → work÷rate + max (kernel & program)
       ├─ hardware_profile.py     [ADD]     peak-rate spec table (Wormhole / Blackhole), named registry
-      ├─ schedule.py             [ADD]     overlap + critical-path combiner
+      ├─ schedule.py             [ADD]     overlap / throughput-bound combiner
       ├─ report.py               [TRIM]    drop ablation_metrics + role_calibration; keep per-family/size
       └─ cli.py                  [CHANGE]  drop tuning flags; add --hw-profile
 ```
@@ -103,7 +105,7 @@ python/
 | `parse.py` | change | build per-op work records and the dependency graph; keep `measured_cycles` and tick-durations **only as diagnostics**. |
 | `types.py` | change | replace `EstimatorConfig` placeholders with `HardwareProfile`; add per-op record types. |
 | `model.py` | replace | `work ÷ rate` per op; `max(compute, movement)` per kernel; remove additive sum, roofline-on-top, stall/sync/blocked terms and `mismatch_reason` escalation. |
-| `schedule.py` | add | dependency-DAG critical-path combiner. |
+| `schedule.py` | add | overlap / throughput-bound combiner (`max` within node and across parallel nodes). |
 | `hardware_profile.py` | add | typed `HardwareProfile` registry of built-in parts (source of truth), looked up by name. File-based loader for custom specs deferred until the field set settles and sweeps need it. |
 | `report.py` | trim | remove `ablation_metrics` + `role_calibration_suggestions`; per-kernel decomposition + per-family/size reporting. |
 | `cli.py` | change | drop model-tuning flags; add `--hw-profile`. |
@@ -142,7 +144,7 @@ Under ideal-peak there are **no hardware labels**, so v1.0 cannot be scored by a
 
 1. **Target part + spec source** — Wormhole or Blackhole? Peak rates from datasheet or known tt-metal constants? (blocks `hardware_profile.py`)
 2. **Trace instrumentation** — can the simulator emit `op_type` + `dtype` per compute op? (blocks the compute term; gates Phase 0 of validation)
-3. **Overlap model** — confirm `max(compute, movement)` per kernel + critical-path across kernels.
+3. **Overlap model** — decided: `max(compute, movement)` per kernel; throughput-bound `max` across parallel nodes. Latency / critical-path regime (fill-drain, cross-node serialization) deferred.
 4. **Scope line** — ideal-peak is the v1.0 deliverable; measured-cycle validation is out of scope until later.
 
 ---
@@ -166,13 +168,13 @@ Under ideal-peak there are **no hardware labels**, so v1.0 cannot be scored by a
 - [x] Movement work records from `copy_end` localities (`extract_kernel_work`, alongside v0.1)
 - [x] Handle traces without compute-op events gracefully (movement-only, empty compute path)
 - [x] Consume `compute_op` events → compute work records (consumer done + tested against the contract; real traces await sim emission)
-- [ ] Reconstruct dependency/overlap structure (`kernel_block.on`, dfb push/pop, pipe send/recv)
+- [ ] Reconstruct dependency/overlap structure (`kernel_block.on`, dfb push/pop, pipe send/recv) — deferred; only needed for the latency regime
 - [ ] Demote tick-duration extraction to diagnostics
 
 ### Model & combiner (`cycle_tools/model.py`, `cycle_tools/schedule.py`)
 - [x] Per-op cost: compute = `tiles / rate`; movement = `latency + bytes / bw` (`schedule.op_cycles`)
 - [x] Kernel cost: `max(compute_path, movement_path)` (`schedule.kernel_cycles`)
-- [ ] Program cost: critical path across kernels over the dependency DAG (`schedule.py` — placeholder only)
+- [x] Program cost: throughput-bound `max` — parallel cores across nodes, concurrent RISCs within a node (`schedule.program_cycles`). DAG latency regime deferred.
 - [ ] Remove additive sum, roofline-on-top, stall/sync/blocked terms
 - [ ] Remove `mismatch_reason` escalation logic
 

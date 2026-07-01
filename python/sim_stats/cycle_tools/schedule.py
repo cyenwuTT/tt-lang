@@ -44,15 +44,24 @@ def kernel_cycles(work: KernelWork, hw: HardwareProfile) -> float:
 
 
 def program_cycles(kernels: list[KernelWork], hw: HardwareProfile) -> float:
-    """Program-level cycles across all kernels.
+    """Program-level cycles under the ideal-peak, throughput-bound model.
 
-    PLACEHOLDER (Step 5): the real version walks the kernel dependency DAG
-    (edges from ``kernel_block.on`` + DFB push/pop + pipe send/recv) and returns
-    its critical path. For now it approximates each node by its slowest kernel
-    and sums across nodes, pending the dependency reconstruction.
+    Two levels of overlap:
+      - within a node: the reader / compute / writer kernels run on that core's
+        concurrent RISCs, so the node's time is the ``max`` of its kernels.
+      - across nodes: distinct nodes are separate cores running in parallel, so
+        the program time is the ``max`` over nodes.
+
+    Net: the program is throughput-bound by its slowest kernel. Under ideal-peak
+    with full pipelining, connected producer/consumer kernels overlap in steady
+    state, so there is no serial sum along a dependency chain.
+
+    Deferred (would need the dependency DAG from kernel_block.on / dfb push-pop /
+    pipe send-recv): fill/drain latency for small workloads, and explicit
+    cross-node serialization — i.e. the latency regime rather than throughput.
     """
     per_node: dict[str, float] = {}
     for k in kernels:
         node = node_from_kernel(k.kernel)
         per_node[node] = max(per_node.get(node, 0.0), kernel_cycles(k, hw))
-    return sum(per_node.values())
+    return max(per_node.values(), default=0.0)
