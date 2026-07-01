@@ -384,3 +384,176 @@ def test_zero_work_zero_cycles() -> None:
     kw = KernelWork(kernel="node0-compute")
     assert kernel_cycles(kw, hw) == 0.0
     assert program_cycles([kw], hw) == 0.0
+
+
+# ---------------------------------------------------------------------------
+# v1.0 invariants / regression fixtures (Step 3)
+#
+# These assert structural PROPERTIES that must hold for any valid input and
+# survive later steps (e.g. Step 5 replacing the program_cycles combiner). They
+# test bounds and guarantees, not a placeholder's exact arithmetic, so they do
+# not need rewriting when the combiner changes.
+# ---------------------------------------------------------------------------
+
+
+def _mixed_kernel() -> KernelWork:
+    """A kernel with both a compute and a movement op (compute path dominates)."""
+    return KernelWork(
+        kernel="node0-compute",
+        ops=[
+            OpWork(kind="compute", op_type="matmul", dtype="bf16", tiles=10),  # 5
+            OpWork(kind="movement", op_type="copy", tiles=4, locality="dram"),  # 4
+        ],
+    )
+
+
+def test_compute_cost_monotonic_in_tiles() -> None:
+    # Doubling compute tiles doubles the compute cost (rate fixed).
+    hw = _hw()
+    one = op_cycles(
+        OpWork(kind="compute", op_type="matmul", dtype="bf16", tiles=10), hw
+    )
+    two = op_cycles(
+        OpWork(kind="compute", op_type="matmul", dtype="bf16", tiles=20), hw
+    )
+    assert one == 5.0
+    assert two == 2 * one
+
+
+def test_kernel_cycles_never_double_counts() -> None:
+    # The headline of the restructure: overlap (max), never additive (sum).
+    # max(compute, movement) <= kernel <= compute + movement, and strictly less
+    # than the additive sum when both paths are non-zero.
+    hw = _hw()
+    kw = _mixed_kernel()
+    compute_path, movement_path = 5.0, 4.0
+    k = kernel_cycles(kw, hw)
+
+    assert max(compute_path, movement_path) <= k <= compute_path + movement_path
+    assert k < compute_path + movement_path
+
+
+def test_kernel_cycles_non_negative() -> None:
+    hw = _hw()
+    assert kernel_cycles(_mixed_kernel(), hw) >= 0.0
+    assert kernel_cycles(KernelWork(kernel="node0-read"), hw) >= 0.0
+
+
+def test_kernel_cycles_deterministic() -> None:
+    # Same (work, profile) -> identical output (pure function, no hidden state).
+    hw = _hw()
+    kw = _mixed_kernel()
+    assert kernel_cycles(kw, hw) == kernel_cycles(kw, hw)
+
+
+def test_program_cycles_bounded_by_max_and_sum_of_kernels() -> None:
+    # Bound holds for the current per-node-max placeholder AND the future
+    # dependency-DAG critical path (Step 5): a program can be no faster than its
+    # slowest kernel and no slower than running every kernel serially.
+    hw = _hw()
+    kernels = [
+        KernelWork(
+            kernel="node0-read",
+            ops=[OpWork(kind="movement", op_type="copy", tiles=4, locality="dram")],
+        ),  # 4
+        KernelWork(
+            kernel="node0-compute",
+            ops=[OpWork(kind="compute", op_type="matmul", dtype="bf16", tiles=10)],
+        ),  # 5
+    ]
+    ks = [kernel_cycles(k, hw) for k in kernels]
+    prog = program_cycles(kernels, hw)
+
+    assert max(ks) <= prog <= sum(ks)
+
+
+def test_hand_derived_simple_kernel_value() -> None:
+    # Hand-derived golden: a read kernel moving 4 dram tiles.
+    # bytes = 4 * 2 = 8; bw(dram) = 2 -> 4.0 cycles. Locks kernel-level output
+    # (stable across the Step 5 program-combiner change).
+    hw = _hw()
+    kw = KernelWork(
+        kernel="node0-read",
+        ops=[OpWork(kind="movement", op_type="copy", tiles=4, locality="dram")],
+    )
+    assert kernel_cycles(kw, hw) == 4.0
+
+
+# ---------------------------------------------------------------------------
+# v1.0 compute path (Step 4) — consumer built against synthetic compute_op
+# events (the agreed sim instrumentation contract). These tests are final: when
+# the simulator starts emitting compute_op events, the same parser handles them
+# unchanged.
+# ---------------------------------------------------------------------------
+
+
+def test_extract_kernel_work_reads_compute_op_events() -> None:
+    events = [
+        TraceEvent(0, "kernel_start", "node0-compute", {}),
+        TraceEvent(
+            2,
+            "compute_op",
+            "node0-compute",
+            {"op_type": "matmul", "dtype": "bf16", "tiles": 10},
+        ),
+        TraceEvent(3, "kernel_end", "node0-compute", {}),
+    ]
+
+    work = extract_kernel_work(events)
+    ops = work["node0-compute"].ops
+
+    assert len(ops) == 1
+    assert ops[0].kind == "compute"
+    assert ops[0].op_type == "matmul"
+    assert ops[0].dtype == "bf16"
+    assert ops[0].tiles == 10
+
+
+def test_kernel_cycles_from_trace_is_max_of_compute_and_movement() -> None:
+    # End-to-end through the parser: a kernel that both computes and moves data.
+    events = [
+        TraceEvent(0, "kernel_start", "node0-compute", {}),
+        TraceEvent(
+            1,
+            "compute_op",
+            "node0-compute",
+            {"op_type": "matmul", "dtype": "bf16", "tiles": 10},  # 10/2 = 5
+        ),
+        TraceEvent(
+            2, "copy_end", "node0-compute", {"tiles": 4, "dram": 4}
+        ),  # 4*2/2 = 4
+        TraceEvent(3, "kernel_end", "node0-compute", {}),
+    ]
+
+    work = extract_kernel_work(events)
+    kw = work["node0-compute"]
+    kinds = sorted(o.kind for o in kw.ops)
+
+    assert kinds == ["compute", "movement"]
+    assert kernel_cycles(kw, _hw()) == 5.0  # max(5, 4)
+
+
+def test_compute_op_with_zero_tiles_is_ignored() -> None:
+    events = [
+        TraceEvent(0, "kernel_start", "node0-compute", {}),
+        TraceEvent(1, "compute_op", "node0-compute", {"op_type": "add", "tiles": 0}),
+        TraceEvent(2, "kernel_end", "node0-compute", {}),
+    ]
+
+    work = extract_kernel_work(events)
+    assert work["node0-compute"].ops == []
+
+
+def test_compute_op_missing_dtype_falls_back_to_default_rate() -> None:
+    # op_type + tiles only (the minimum-viable contract); dtype defaults to "".
+    # rate_for("matmul", "") misses the (matmul, bf16) entry -> default rate 1.0.
+    hw = _hw()
+    events = [
+        TraceEvent(0, "kernel_start", "node0-compute", {}),
+        TraceEvent(1, "compute_op", "node0-compute", {"op_type": "matmul", "tiles": 4}),
+        TraceEvent(2, "kernel_end", "node0-compute", {}),
+    ]
+
+    work = extract_kernel_work(events)
+    # 4 tiles / default rate 1.0 = 4.0
+    assert kernel_cycles(work["node0-compute"], hw) == 4.0

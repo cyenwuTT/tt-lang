@@ -130,7 +130,7 @@ python/
 
 Under ideal-peak there are **no hardware labels**, so v1.0 cannot be scored by accuracy. It is validated for correctness, behavior, and sensitivity; accuracy is deferred until profiling data exists.
 
-- **Correctness (regression fixtures):** invariants — `2× tiles → 2× compute cycles`, `estimate ≥ roofline lower bound`, `max(compute, movement) ≤ estimate ≤ compute + movement`, zero work → zero cycles, determinism. Hand-derived cross-checks on simple kernels. Synthetic identifiability (recover known constants from generated labels).
+- **Correctness (regression fixtures):** invariants — `2× tiles → 2× compute cycles`, `estimate ≥ roofline lower bound`, `max(compute, movement) ≤ estimate ≤ compute + movement` (never additive), zero work → zero cycles, determinism. Plus hand-derived cross-checks on simple kernels. (Synthetic identifiability does not apply under ideal-peak — there is no fitting step.)
 - **Behavior:** per-kernel decomposition (compute vs movement, dominant term, bound class); coverage across a work-count matrix (compute-bound / memory-bound / mixed / multi-core / pipe),
   small → large.
 - **Sensitivity:** sweep the hardware spec and confirm estimates/bound-class shift sensibly.
@@ -165,7 +165,7 @@ Under ideal-peak there are **no hardware labels**, so v1.0 cannot be scored by a
 ### Parsing (`cycle_tools/parse.py`)
 - [x] Movement work records from `copy_end` localities (`extract_kernel_work`, alongside v0.1)
 - [x] Handle traces without compute-op events gracefully (movement-only, empty compute path)
-- [ ] Consume compute-op events → per-op work records (blocked on sim instrumentation)
+- [x] Consume `compute_op` events → compute work records (consumer done + tested against the contract; real traces await sim emission)
 - [ ] Reconstruct dependency/overlap structure (`kernel_block.on`, dfb push/pop, pipe send/recv)
 - [ ] Demote tick-duration extraction to diagnostics
 
@@ -194,9 +194,9 @@ Under ideal-peak there are **no hardware labels**, so v1.0 cannot be scored by a
 - [ ] Update `cycle_tools/__init__.py` exports
 
 ### Validation
-- [ ] Invariant tests (monotonicity, bounds, overlap, determinism, zero-work) as regression fixtures
-- [ ] Hand-derived cross-checks on simple kernels
-- [ ] Synthetic identifiability check
+- [x] Invariant tests (monotonicity, bounds, overlap=max-not-sum, determinism, zero-work) as regression fixtures
+- [x] Hand-derived cross-checks on simple kernels
+- [~] Synthetic identifiability check — N/A under ideal-peak (no fitting/calibration step to identify)
 - [ ] Behavioral coverage across the work-count matrix
 - [ ] Sensitivity sweep over the hardware spec
 - [ ] (Deferred) hardware-profile validation

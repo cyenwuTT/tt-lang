@@ -172,12 +172,16 @@ def extract_kernel_features(events: list[TraceEvent]) -> dict[str, KernelFeature
 def extract_kernel_work(events: list[TraceEvent]) -> dict[str, KernelWork]:
     """Build per-kernel v1.0 work records from trace events.
 
-    Step 2 of the v0.1 -> v1.0 restructure (Parallel Change / expand phase):
-    movement ops only, derived from the per-locality tile counts on ``copy_end``.
-    Compute ops are added once the simulator emits per-op events (Step 4); until
-    then the compute path is empty and the estimate is movement-only.
+    Reads two event kinds:
+      - ``copy_end``   -> movement OpWork, one per non-zero locality tile count.
+      - ``compute_op`` -> compute OpWork (op_type, dtype, tiles).
 
-    This runs *alongside* :func:`extract_kernel_features`; it does not replace it.
+    The ``compute_op`` events are emitted by the simulator once per math op
+    (Step 4 instrumentation). Until that instrumentation lands they are simply
+    absent, so the compute path is empty and the estimate is movement-only — no
+    code change here is needed when the events start appearing.
+
+    Runs *alongside* :func:`extract_kernel_features`; it does not replace it.
     """
     work: dict[str, KernelWork] = {}
 
@@ -196,7 +200,19 @@ def extract_kernel_work(events: list[TraceEvent]) -> dict[str, KernelWork]:
             kw = KernelWork(kernel=kernel, node_index=node_idx)
             work[kernel] = kw
 
-        if ev.event == "copy_end":
+        if ev.event == "compute_op":
+            # Per-op compute work emitted by the simulator (Step 4 instrumentation).
+            tiles = as_int(ev.data.get("tiles", 0))
+            if tiles > 0:
+                kw.ops.append(
+                    OpWork(
+                        kind="compute",
+                        op_type=str(ev.data.get("op_type", "")),
+                        dtype=str(ev.data.get("dtype", "")),
+                        tiles=tiles,
+                    )
+                )
+        elif ev.event == "copy_end":
             # One movement op per locality with a non-zero tile count.
             for locality in ("local_l1", "remote_l1", "dram"):
                 tiles = as_int(ev.data.get(locality, 0))
