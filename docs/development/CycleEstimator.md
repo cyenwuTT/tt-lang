@@ -11,9 +11,9 @@ For the current (v0.1) source layout see `python/sim_stats/cycle_tools/`.
 `tt-lang-sim-cycles` post-processes a `tt-lang-sim --trace` JSONL file and predicts each kernel's cycle count as an **additive sum of trace-derived terms**:
 
 ```
-estimate = dfb_wait_dur + dfb_reserve_dur + copy_du(phase durations, from trace ticks)
-         + roofline_base (max of compute / memory ceiling)
-         + stall + sync + copy_overhead + blocked + launch (per-event overheads)
+estimate = dfb_wait_dur + dfb_reserve_dur + copy_dur         (phase durations, from trace ticks)
+         + roofline_base                                     (max of compute / memory ceiling)
+         + stall + sync + copy_overhead + blocked + launch   (per-event overheads)
 ```
 
 Pipeline: `parse_trace → extract_kernel_features → estimate_kernel_cycles → group_kernel_estimates → report`.
@@ -26,7 +26,7 @@ Constants (`flops_per_tile`, `peak_flops_per_cycle`, per-event costs, scale fact
 Three reasons — each a property of the design, not a tuning error:
 
 1. **The prediction target is logical ticks, not cycles.**
-  The simulator `tick` increments `+1` per scheduler activation that makes progress (`greenlet_scheduler.py`) — a fairness/ ordering counter, not time. `measured_cycles = kernel_end.tick − kernel_start.tick` counts scheduler turns.
+  The simulator `tick` increments `+1` per scheduler activation that makes progress (`greenlet_scheduler.py`) — a fairness/ordering counter, not time. `measured_cycles = kernel_end.tick − kernel_start.tick` counts scheduler turns.
   A "phase-only" estimate reconstructs it at ~0% WAPE, which only proves the model sums sub-intervals back into the whole — tautological, and meaningless as a hardware predictor.
 
 2. **The combiner double-counts.**
@@ -117,6 +117,32 @@ python/
 - The change is **additive and non-breaking**:
   Not touch the scheduler tick, so existing events, tick progression, and kernel spans are unchanged; `tt-lang-sim-stats` ignores unknown events; old traces still parse (treated as "no compute term"). Put the new event under its own trace category so it is filterable and trace size stays controllable.
 
+#### `compute_op` coverage (current instrumentation)
+
+`op_type`/`tiles` are only known at the op site, so each op-family emits at its own
+chokepoint. Covered so far:
+
+| site | ops | `op_type` |
+|---|---|---|
+| `dfb.Block._binary_op` | `+ - * / //` | operator name (add/sub/mul/truediv/floordiv) |
+| `dfb.matmul` | matmul | `matmul` (tiles = M·K·N) |
+| `math._create_unary_op_wrapper` | auto-gen unary (exp, rsqrt, sqrt, relu, sign, …) | op name |
+| `math._apply_unary_with_params` | relu_max, clamp, elu, leaky_relu, celu, prelu, softplus, hardtanh, round, threshold | `eltwise_unary` (generic — no name threaded) |
+| `math._reduce_impl` | reduce_sum, reduce_max | `reduce_sum` / `reduce_max` |
+
+**Gaps (not yet emitting `compute_op`):**
+
+| site | ops | note |
+|---|---|---|
+| `math._apply_binary_op` | `max`, `min`, `gt`, `lt`, `eq`, `ne` | separate math binary/compare path from `Block._binary_op` |
+| `block.broadcast` | broadcast | fan-out/layout — decide whether it counts as compute |
+| `block.transpose` | transpose | layout op — decide whether it counts as compute |
+| tile-level / other | — | anything not routed through the sites above |
+
+`_apply_unary_with_params` uses a generic `op_type`; thread a name from its callers
+if per-op compute rates are needed. Broadcast/transpose are layout ops — instrument
+them only if the compute model should charge for them.
+
 ---
 
 ## 5. Removed in v1.0
@@ -125,6 +151,32 @@ python/
 - `report.ablation_metrics`, `report role_calibration_suggestions`.
 - `model.mismatch_reason` escalation gate.
 - The model-tuning CLI flags (already hidden in the current CLI).
+
+### Removal readiness & order
+
+**Prerequisites (met):** peak produces complete compute + movement estimates, is
+reachable (`--model peak`), and has summary / detailed / JSON / view-report. The
+sim `compute_op` instrumentation exists in this branch, so both movement and
+compute flow end-to-end.
+
+**Do atomically (or imports break):**
+- remove the v0.1 model (`estimate_kernel_cycles`, `EstimatorConfig`,
+  `mismatch_reason`) and report helpers (`ablation_metrics`,
+  `role_calibration_suggestions`);
+- slim `extract_kernel_features` / `KernelFeatures` down to the `measured_cycles`
+  / `blocked_cycles` diagnostics, folded onto `KernelWork`;
+- update `cycle_estimator.py` + `cycle_tools/__init__.py` re-exports in the same
+  change (they still name the removed symbols);
+- flip the default `--model` to peak; update tests.
+
+**Accept before making peak the default:**
+- compute rates are provisional placeholders (not hardware-validated);
+- coverage gaps mean some ops emit no `compute_op` — `max`/`min`/compare (via
+  `math._apply_binary_op`), `block.broadcast`/`transpose` — so those show 0
+  compute. Closing the `_apply_binary_op` gap first is cheap and avoids a silent
+  under-count;
+- keep the sim instrumentation and this removal on the same merge, so the peak
+  default never ships without its producer.
 
 ---
 
@@ -151,12 +203,13 @@ Under ideal-peak there are **no hardware labels**, so v1.0 cannot be scored by a
 
 ## Implementation Checklist
 
-### Trace instrumentation (`python/sim/`)
-- [ ] Register a compute-op event name + category in `trace.py` (`_EVENT_CATEGORY`, `ALL_CATEGORIES`)
-- [ ] Emit the event at op sites in `math.py` with `op_type`, `dtype`, `tiles` (and tile shape)
-- [ ] Confirm instrumentation does not alter tick progression or existing events
-- [ ] Confirm `tt-lang-sim-stats` output is unchanged (unknown event ignored)
-- [ ] New event is under its own trace category (filterable; size control)
+### Trace instrumentation (`python/sim/`) — prototyped in a local branch, not merged
+- [x] Register `compute_op` event + `compute` category in `trace.py`
+- [x] Emit at main op sites — binary (`Block._binary_op`), matmul, unary, reduce (`op_type` + `tiles`)
+- [x] New event under its own `compute` trace category (filterable)
+- [ ] `dtype` not yet emitted (falls back to `compute_rate_default`)
+- [ ] Coverage gaps: `math._apply_binary_op` (max/min/compare), `block.broadcast`/`transpose`, `_apply_unary_with_params` generic label — see coverage table above
+- [ ] Review + merge into the shared simulator module
 
 ### Data model (`cycle_tools/types.py`)
 - [x] Add `HardwareProfile` (compute rates by op/dtype, NoC bw by locality, latency, clock, engines)
@@ -180,8 +233,8 @@ Under ideal-peak there are **no hardware labels**, so v1.0 cannot be scored by a
 
 ### Hardware profile (`cycle_tools/hardware_profile.py`)
 - [x] Add `HardwareProfile` named registry (`get_profile`, scaffold, provisional rates)
-- [ ] Fill the spec table for the chosen target part (pending decision #1)
-- [ ] Each rate documents its source (datasheet vs known constant)
+- [~] Fill the spec table — `wormhole_b0` **movement** rates seeded from tt-metal `noc_latencies.yaml` + soc descriptor; **compute** rates still pending arch/ISA docs
+- [x] Each rate documents its source (inline `# source:` citations to the tt-metal files)
 - [x] Custom-profile file loader — `load_profile_json` / `resolve_profile`; `--hw-profile <name|path.json>`
 
 ### Reporting (`cycle_tools/report.py`)
@@ -190,15 +243,15 @@ Under ideal-peak there are **no hardware labels**, so v1.0 cannot be scored by a
 - [x] Peak JSON export (`--json-out`) — full, self-describing (`tool`/`schema_version`/profile)
 - [x] Reload + re-render a saved report (`--view-report`), with report-vs-trace validation
 - [ ] Per-family + per-size reporting (never a single global number)
-- [ ] Remove `ablation_metrics` and `role_calibration_suggestions` (Step 7 / contract)
-- [ ] Update `feature_provenance` to hardware-derived sources (Step 7 / contract)
+- [ ] Remove `ablation_metrics` and `role_calibration_suggestions` (v0.1 removal)
+- [ ] Update `feature_provenance` to hardware-derived sources (v0.1 removal)
 
 ### CLI & entry (`cycle_tools/cli.py`, `cycle_estimator.py`, `cycle_tools/__init__.py`)
 - [x] Add `--model peak` + `--hw-profile` (v1.0 path reachable alongside v0.1)
 - [x] Add `--detailed`, `--json-out` (peak), `--view-report` (render saved report, no trace)
-- [ ] Drop v0.1 model-tuning flags + make peak the default (Step 7 / contract)
-- [ ] Update `cycle_estimator.py` re-exports (drop removed symbols) (Step 7 / contract)
-- [ ] Update `cycle_tools/__init__.py` exports (Step 7 / contract)
+- [ ] Drop v0.1 model-tuning flags + make peak the default (v0.1 removal)
+- [ ] Update `cycle_estimator.py` re-exports (drop removed symbols) (v0.1 removal)
+- [ ] Update `cycle_tools/__init__.py` exports (v0.1 removal)
 
 ### Validation
 - [x] Invariant tests (monotonicity, bounds, overlap=max-not-sum, determinism, zero-work) as regression fixtures

@@ -615,6 +615,23 @@ def test_compute_op_missing_dtype_falls_back_to_default_rate() -> None:
 # ---------------------------------------------------------------------------
 
 
+def test_rate_for_is_dtype_optional() -> None:
+    hw = HardwareProfile(
+        name="t",
+        compute_rate={("matmul", "bf16"): 8.0, ("add", ""): 32.0},
+        compute_rate_default=2.0,
+        noc_bw={},
+        noc_latency={},
+        clock_ghz=1.0,
+        bytes_per_tile=1.0,
+    )
+    assert hw.rate_for("matmul", "bf16") == 8.0  # exact (op, dtype)
+    assert hw.rate_for("matmul", "fp32") == 2.0  # no (matmul, "") -> default
+    assert hw.rate_for("add", "bf16") == 32.0  # op-type-only entry serves any dtype
+    assert hw.rate_for("add") == 32.0  # dtype omitted -> (add, "")
+    assert hw.rate_for("exp") == 2.0  # unknown op -> default
+
+
 def test_kernel_paths_splits_compute_and_movement() -> None:
     hw = _hw()
     kw = KernelWork(
@@ -646,7 +663,7 @@ def test_peak_report_shows_decomposition_and_program_total(capsys) -> None:
     assert "ideal-peak model" in out
     assert "node0-compute" in out
     assert "node0-read" in out
-    assert "Program (throughput-bound)" in out
+    assert "Program cycles" in out
 
 
 def test_peak_report_notes_empty_compute_path(capsys) -> None:
@@ -684,7 +701,8 @@ def test_peak_summary_rolls_up_per_node_and_reports_utilization(capsys) -> None:
 
     assert "Node" in out
     assert "node0" in out
-    assert "Active nodes: 1 / 2" in out
+    assert "1 / 2" in out
+    assert "Bottleneck" in out
     assert "node1" not in out  # idle node hidden by default
 
 

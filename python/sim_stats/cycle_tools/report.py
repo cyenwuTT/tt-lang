@@ -9,6 +9,7 @@ import json
 import math
 from dataclasses import asdict
 from pathlib import Path
+from typing import Any, cast
 
 from .model import group_kernel_estimates
 from .types import (
@@ -248,30 +249,95 @@ def write_json_report(
 _PEAK_TOOL = "tt-lang-sim-cycles"
 _PEAK_SCHEMA_VERSION = 1
 _PEAK_W = 78
+_FRAME = "=" * _PEAK_W  # report frame (top / bottom only)
+_SECT = "-" * _PEAK_W  # section break
+_HDR = "." * _PEAK_W  # column-header underline
+
+
+def _short_bound(bound: str) -> str:
+    """ "compute-bound" -> "compute"; the table header already says "Bound"."""
+    return bound.split("-", 1)[0]
+
+
+def _per_node_rollup(result: PeakResult) -> dict[str, tuple[float, float, float, str]]:
+    """Per-node (compute, movement, cycles, bound) — max over the node's kernels."""
+    agg: dict[str, tuple[float, float, float]] = {}
+    for pk in result.kernels:
+        c, m, cy = agg.get(pk.node, (0.0, 0.0, 0.0))
+        agg[pk.node] = (
+            max(c, pk.compute_cycles),
+            max(m, pk.movement_cycles),
+            max(cy, pk.cycles),
+        )
+    return {
+        node: (c, m, cy, "compute" if c > m else "memory")
+        for node, (c, m, cy) in agg.items()
+    }
 
 
 def _peak_header(result: PeakResult, unit: str) -> None:
-    print("\n" + "=" * _PEAK_W)
-    print(f"Cycle Estimate — ideal-peak model (profile: {result.profile_name})")
-    print("=" * _PEAK_W)
+    print("\n" + _FRAME)
+    print("Cycle Estimate — ideal-peak model")
+    print(f"hw-profile: {result.profile_name}")
+    print(_FRAME)  # title block / tables separator
     print(f"{unit:<28} {'Compute':>12} {'Movement':>12} {'Cycles':>12}  Bound")
-    print("-" * _PEAK_W)
+    print(_HDR)
 
 
-def _peak_footer(result: PeakResult) -> None:
-    print("-" * _PEAK_W)
-    print(
-        f"{'Program (throughput-bound)':<28} {'':>12} {'':>12} "
-        f"{result.program_cycles:>12.2f}"
-    )
+def _peak_stats_footer(result: PeakResult) -> None:
+    """Bound summary table + program/active/bottleneck stats. Shared by both views."""
+    rollup = _per_node_rollup(result)
+    active = {n: v for n, v in rollup.items() if v[2] > 0.0}
+
+    # Bound summary table (active nodes only) — its own section.
+    print(_SECT)
+    print(f"{'Type':<10}{'Nodes':>8}{'Avg Cycles':>14}{'Max':>14}   Max node")
+    print(_HDR)
+    by_bound: dict[str, list[tuple[str, float]]] = {}
+    for node, (_c, _m, cy, bound) in active.items():
+        by_bound.setdefault(bound, []).append((node, cy))
+    for bound in ("compute", "memory"):  # always show both types
+        rows = by_bound.get(bound, [])
+        count = len(rows)
+        if rows:
+            avg = sum(cy for _, cy in rows) / count
+            max_cy = max(cy for _, cy in rows)
+            max_node = sorted((n for n, cy in rows if cy == max_cy), key=node_sort_key)[
+                0
+            ]
+        else:
+            avg = max_cy = 0.0
+            max_node = "-"
+        print(f"{bound:<10}{count:>8}{avg:>14.2f}{max_cy:>14.2f}   {max_node}")
+
+    # Summary — its own section.
     idle = result.total_nodes - result.active_nodes
-    print(f"Active nodes: {result.active_nodes} / {result.total_nodes}   ({idle} idle)")
-    print("=" * _PEAK_W)
+    print(_SECT)
+    print(f"Program cycles : {result.program_cycles:.2f}")
+    print(
+        f"Active nodes   : {result.active_nodes} / {result.total_nodes}  ({idle} idle)"
+    )
+    print(f"Bottleneck     : {_bottleneck(active)}")
+    print(_FRAME)
     if sum(k.compute_cycles for k in result.kernels) == 0.0:
         print(
             "note: compute path is 0 — no compute_op events in this trace "
             "(sim instrumentation pending); movement-only estimate."
         )
+
+
+def _bottleneck(active: dict[str, tuple[float, float, float, str]]) -> str:
+    """Node(s) setting program time. Ties (common under ideal-peak) are reported
+    as a count + resource, not a single arbitrary node."""
+    if not active:
+        return "none (no active nodes)"
+    max_cy = max(v[2] for v in active.values())
+    at_max = [(n, v[3]) for n, v in active.items() if v[2] == max_cy]
+    bounds = sorted({b for _, b in at_max})
+    bound_str = bounds[0] if len(bounds) == 1 else "/".join(bounds)
+    if len(at_max) == 1:
+        return f"{at_max[0][0]} @ {max_cy:.2f} ({bound_str}-bound)"
+    return f"{len(at_max)} nodes @ {max_cy:.2f} ({bound_str}-bound)"
 
 
 def print_peak_report(result: PeakResult) -> None:
@@ -280,32 +346,25 @@ def print_peak_report(result: PeakResult) -> None:
     for pk in result.kernels:
         print(
             f"{pk.kernel:<28} {pk.compute_cycles:>12.2f} {pk.movement_cycles:>12.2f} "
-            f"{pk.cycles:>12.2f}  {pk.bound}"
+            f"{pk.cycles:>12.2f}  {_short_bound(pk.bound)}"
         )
-    _peak_footer(result)
+    _peak_stats_footer(result)
 
 
 def print_peak_summary(result: PeakResult, include_zero: bool = False) -> None:
-    """Clean per-node rollup of the peak result (the default view).
+    """Per-node rollup of the peak result (the default view).
 
     Each node's columns are the max over its kernels (concurrent RISCs), matching
     the program combiner.
     """
-    per_node: dict[str, list[float]] = {}
-    for pk in result.kernels:
-        entry = per_node.setdefault(pk.node, [0.0, 0.0, 0.0])
-        entry[0] = max(entry[0], pk.compute_cycles)
-        entry[1] = max(entry[1], pk.movement_cycles)
-        entry[2] = max(entry[2], pk.cycles)
-
+    rollup = _per_node_rollup(result)
     _peak_header(result, "Node")
-    for node in sorted(per_node, key=node_sort_key):
-        compute, movement, cyc = per_node[node]
+    for node in sorted(rollup, key=node_sort_key):
+        compute, movement, cyc, bound = rollup[node]
         if not include_zero and cyc == 0.0:
             continue
-        bound = "compute-bound" if compute > movement else "memory-bound"
         print(f"{node:<28} {compute:>12.2f} {movement:>12.2f} {cyc:>12.2f}  {bound}")
-    _peak_footer(result)
+    _peak_stats_footer(result)
 
 
 def write_peak_json_report(path: Path, result: PeakResult) -> None:
@@ -337,27 +396,29 @@ def load_peak_result(path: Path | str) -> PeakResult:
         raise FileNotFoundError(f"report file not found: {p}") from None
 
     try:
-        data = json.loads(text)
+        raw = json.loads(text)
     except json.JSONDecodeError:
         raise ValueError(
             f"{p} is not a cycle report: not a single JSON object "
             "(a raw --trace file is JSON Lines, not a report)"
         ) from None
 
-    if (
-        not isinstance(data, dict)
-        or data.get("tool") != _PEAK_TOOL
-        or "kernels" not in data
-    ):
+    if not isinstance(raw, dict):
+        raise ValueError(f"{p} is not a tt-lang-sim-cycles report (not a JSON object)")
+
+    # Give the decoded JSON a concrete type so the reads below are not "unknown".
+    data = cast("dict[str, Any]", raw)
+    if data.get("tool") != _PEAK_TOOL or "kernels" not in data:
         raise ValueError(
             f"{p} is not a tt-lang-sim-cycles report (missing tool marker or kernels)"
         )
 
     try:
-        kernels = [PeakKernel(**k) for k in data["kernels"]]
-        profile = data.get("profile", {})
+        raw_kernels: list[dict[str, Any]] = data["kernels"]
+        kernels = [PeakKernel(**k) for k in raw_kernels]
+        profile: dict[str, Any] = data.get("profile", {})
         return PeakResult(
-            profile_name=profile.get("name", data.get("profile_name", "?")),
+            profile_name=str(profile.get("name", data.get("profile_name", "?"))),
             profile=profile,
             program_cycles=float(data["program_cycles"]),
             total_nodes=int(data.get("total_nodes", 0)),

@@ -27,6 +27,7 @@ from .dfb import (
     matmul,
     _dry_run_result,
 )
+from .trace import TRACE, trace  # [cycle-estimator] compute_op instrumentation
 from .ttnnsim import ROW_MAJOR_LAYOUT, Tensor
 from .typedefs import PositiveInt
 
@@ -63,6 +64,9 @@ def _create_unary_op_wrapper(
         result_list: List[Tensor] = [Tensor(t, layout) for t in result_torch]
         result_block = Block.from_list(result_list, shape=block._shape)  # type: ignore[attr-defined]
         track_source_blocks(result_block, block)
+        # [cycle-estimator] compute_op instrumentation
+        if TRACE.enabled:
+            trace("compute_op", op_type=name, tiles=len(block))
         return result_block
 
     wrapper.__name__ = name
@@ -194,6 +198,9 @@ def _apply_unary_with_params(
 
     result_block = Block.from_list(result_list, shape=block._shape)  # type: ignore[attr-defined]
     track_source_blocks(result_block, block)
+    # [cycle-estimator] generic op_type: no op name is threaded here.
+    if TRACE.enabled:
+        trace("compute_op", op_type="eltwise_unary", tiles=len(block))
     return result_block
 
 
@@ -602,6 +609,9 @@ def _reduce_impl(
 
     result_block = Block.from_list(result_tensors, shape=result_shape)
     track_source_blocks(result_block, block)
+    # [cycle-estimator] compute_op instrumentation
+    if TRACE.enabled:
+        trace("compute_op", op_type=f"reduce_{op}", tiles=len(block))
     return result_block
 
 

@@ -836,6 +836,9 @@ class Block:
                 _dry_run_sentinel(self.layout), left_shape, other
             )
 
+        # [cycle-estimator] compute_op instrumentation
+        if TRACE.enabled:
+            trace("compute_op", op_type=op.__name__, tiles=len(self))
         # Perform operation
         return self._create_temporary_result(
             op(self._buf, other._buf), left_shape, other
@@ -1636,4 +1639,9 @@ def matmul(a: Block, b: Block, _output_hint: Optional[Block] = None) -> Block:
         is_temporary=True,
     )
     track_source_blocks(result_block, a, b)
+    # for cycle-accurate compute ops, trace the MAC-tile volume of the matmul
+    if TRACE.enabled:
+        m, k = a.shape[-2], a.shape[-1]
+        n = b.shape[-1]
+        trace("compute_op", op_type="matmul", tiles=m * k * n)  # MAC-tile volume
     return result_block

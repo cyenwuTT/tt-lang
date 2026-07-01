@@ -102,42 +102,39 @@ class KernelGroupEstimate:
 
 
 # ---------------------------------------------------------------------------
-# v1.0 analytical peak model (scaffolding; not yet wired into the pipeline)
+# v1.0 analytical peak model
 # ---------------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
 class HardwareProfile:
-    """Static hardware spec rates for the analytical peak model.
+    """Static peak-rate hardware spec for the analytical peak model.
 
-    Holds peak throughput/bandwidth constants that cannot be derived from a
-    trace (the trace says *how much* work happens, not *how fast* the part runs).
-    Canonical profiles live in ``hardware_profile.py`` and are looked up by name.
-    A file-based loader for custom profiles is deferred until the field set is
-    settled and sensitivity sweeps actually need it.
+    Holds constants the trace can't provide (how fast the part runs). Built-in
+    profiles live in ``hardware_profile.py`` (looked up by name); custom ones
+    load from JSON via ``load_profile_json``.
     """
 
     name: str
-    # Compute throughput in tiles/cycle, keyed by (op_type, dtype).
-    compute_rate: dict[tuple[str, str], float]
-    # Fallback tiles/cycle when an (op_type, dtype) pair is not listed.
-    compute_rate_default: float
-    # Data-movement bandwidth in bytes/cycle, keyed by locality
-    # ("local_l1", "remote_l1", "dram").
-    noc_bw: dict[str, float]
-    # Per-transfer fixed latency in cycles, keyed by locality.
-    noc_latency: dict[str, float]
-    # Core clock in GHz; used only for cycle<->ns reporting, never in the model.
-    clock_ghz: float
-    # Bytes per tile for the movement term (provisional; dtype-dependent, e.g.
-    # bf16 tile = 32*32*2 = 2048 B). Refined to per-dtype sizing when op events land.
-    bytes_per_tile: float
-    # Number of data-movement engines (reserved for future overlap modelling).
-    dm_engines: int = 1
+    compute_rate: dict[tuple[str, str], float]  # tiles/cycle by (op_type, dtype)
+    compute_rate_default: float  # fallback tiles/cycle
+    noc_bw: dict[str, float]  # bytes/cycle by locality (local_l1/remote_l1/dram)
+    noc_latency: dict[str, float]  # fixed cycles per transfer, by locality
+    clock_ghz: float  # cycle<->ns reporting only, not used in the model
+    bytes_per_tile: float  # movement tile size (provisional; bf16 = 2048 B)
+    dm_engines: int = 1  # reserved for future overlap modelling
 
-    def rate_for(self, op_type: str, dtype: str) -> float:
-        """Peak tiles/cycle for an (op_type, dtype), falling back to the default."""
-        return self.compute_rate.get((op_type, dtype), self.compute_rate_default)
+    def rate_for(self, op_type: str, dtype: str = "") -> float:
+        """Peak tiles/cycle for an op.
+
+        Tiered lookup: exact ``(op_type, dtype)``, then an op-type-only entry
+        ``(op_type, "")``, then ``compute_rate_default``. The op-type-only tier
+        lets rates be keyed by op_type alone when the trace carries no dtype.
+        """
+        for key in ((op_type, dtype), (op_type, "")):
+            if key in self.compute_rate:
+                return self.compute_rate[key]
+        return self.compute_rate_default
 
     def bandwidth_for(self, locality: str) -> float:
         """Peak bytes/cycle for a locality, or 0.0 if unknown."""

@@ -39,7 +39,7 @@ from .context_types import TraceEvent
 # All defined event categories.  Pass ALL_CATEGORIES to :func:`set_tracing`
 # to enable everything; pass an empty frozenset to disable.
 ALL_CATEGORIES: frozenset[str] = frozenset(
-    {"operation", "kernel", "dfb", "copy", "pipe"}
+    {"operation", "kernel", "dfb", "copy", "pipe", "compute"}
 )
 
 
@@ -61,6 +61,7 @@ _EVENT_CATEGORY: dict[str, str] = {
     "copy_end": "copy",
     "pipe_send": "pipe",
     "pipe_recv": "pipe",
+    "compute_op": "compute",  # for cycle-accurate compute ops
 }
 
 
