@@ -12,7 +12,10 @@ Tests cover model behavior and parser edge cases:
 - feature extraction from event spans
 """
 
+import json
 import math
+
+import pytest
 
 from python.sim_stats.cycle_tools.model import (
     estimate_kernel_cycles,
@@ -23,8 +26,14 @@ from python.sim_stats.cycle_tools.parse import (
     extract_kernel_features,
     extract_kernel_work,
 )
+from python.sim_stats.cycle_tools.hardware_profile import (
+    load_profile_json,
+    resolve_profile,
+)
+from python.sim_stats.cycle_tools.report import print_peak_report
 from python.sim_stats.cycle_tools.schedule import (
     kernel_cycles,
+    kernel_paths,
     op_cycles,
     program_cycles,
 )
@@ -593,3 +602,110 @@ def test_compute_op_missing_dtype_falls_back_to_default_rate() -> None:
     work = extract_kernel_work(events)
     # 4 tiles / default rate 1.0 = 4.0
     assert kernel_cycles(work["node0-compute"], hw) == 4.0
+
+
+# ---------------------------------------------------------------------------
+# v1.0 report (Step 6)
+# ---------------------------------------------------------------------------
+
+
+def test_kernel_paths_splits_compute_and_movement() -> None:
+    hw = _hw()
+    kw = KernelWork(
+        kernel="node0-compute",
+        ops=[
+            OpWork(kind="compute", op_type="matmul", dtype="bf16", tiles=10),  # 5
+            OpWork(kind="movement", op_type="copy", tiles=4, locality="dram"),  # 4
+        ],
+    )
+    assert kernel_paths(kw, hw) == (5.0, 4.0)
+
+
+def test_peak_report_shows_decomposition_and_program_total(capsys) -> None:
+    hw = _hw()
+    kernels = [
+        KernelWork(
+            kernel="node0-read",
+            ops=[OpWork(kind="movement", op_type="copy", tiles=4, locality="dram")],
+        ),
+        KernelWork(
+            kernel="node0-compute",
+            ops=[OpWork(kind="compute", op_type="matmul", dtype="bf16", tiles=10)],
+        ),
+    ]
+
+    print_peak_report(kernels, hw)
+    out = capsys.readouterr().out
+
+    assert "ideal-peak model" in out
+    assert "node0-compute" in out
+    assert "node0-read" in out
+    assert "Program (throughput-bound)" in out
+
+
+def test_peak_report_notes_empty_compute_path(capsys) -> None:
+    hw = _hw()
+    kernels = [
+        KernelWork(
+            kernel="node0-read",
+            ops=[OpWork(kind="movement", op_type="copy", tiles=4, locality="dram")],
+        ),
+    ]
+
+    print_peak_report(kernels, hw)
+    out = capsys.readouterr().out
+
+    assert "compute path is 0" in out
+
+
+# ---------------------------------------------------------------------------
+# Custom hardware profile loading (--hw-profile <name|path.json>)
+# ---------------------------------------------------------------------------
+
+
+def _write_profile(path, **overrides) -> None:
+    data = {
+        "name": "custom",
+        "compute_rate": [["matmul", "bf16", 8.0]],
+        "compute_rate_default": 4.0,
+        "noc_bw": {"dram": 2.0},
+        "noc_latency": {"dram": 1.0},
+        "clock_ghz": 1.0,
+        "bytes_per_tile": 2048.0,
+    }
+    data.update(overrides)
+    path.write_text(json.dumps(data), encoding="utf-8")
+
+
+def test_load_profile_json_round_trip(tmp_path) -> None:
+    p = tmp_path / "custom.json"
+    _write_profile(p)
+
+    hw = load_profile_json(p)
+
+    assert hw.name == "custom"
+    assert hw.rate_for("matmul", "bf16") == 8.0  # listed
+    assert hw.rate_for("add", "bf16") == 4.0  # falls back to default
+    assert hw.bandwidth_for("dram") == 2.0
+    assert hw.latency_for("dram") == 1.0
+    assert hw.bytes_per_tile == 2048.0
+
+
+def test_resolve_profile_accepts_builtin_name_and_json_path(tmp_path) -> None:
+    assert resolve_profile("wormhole_b0").name == "wormhole_b0"
+
+    p = tmp_path / "mine.json"
+    _write_profile(p, name="mine")
+    assert resolve_profile(str(p)).name == "mine"
+
+
+def test_load_profile_json_missing_file_raises(tmp_path) -> None:
+    with pytest.raises(FileNotFoundError):
+        load_profile_json(tmp_path / "nope.json")
+
+
+def test_load_profile_json_malformed_raises(tmp_path) -> None:
+    p = tmp_path / "bad.json"
+    p.write_text('{"name": "bad"}', encoding="utf-8")  # missing required keys
+    with pytest.raises(ValueError):
+        load_profile_json(p)

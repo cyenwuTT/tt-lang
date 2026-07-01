@@ -106,7 +106,7 @@ python/
 | `types.py` | change | replace `EstimatorConfig` placeholders with `HardwareProfile`; add per-op record types. |
 | `model.py` | replace | `work ÷ rate` per op; `max(compute, movement)` per kernel; remove additive sum, roofline-on-top, stall/sync/blocked terms and `mismatch_reason` escalation. |
 | `schedule.py` | add | overlap / throughput-bound combiner (`max` within node and across parallel nodes). |
-| `hardware_profile.py` | add | typed `HardwareProfile` registry of built-in parts (source of truth), looked up by name. File-based loader for custom specs deferred until the field set settles and sweeps need it. |
+| `hardware_profile.py` | add | typed `HardwareProfile` registry of built-in parts (source of truth), looked up by name; plus `load_profile_json` / `resolve_profile` so `--hw-profile` accepts a built-in name or a custom `.json` path. |
 | `report.py` | trim | remove `ablation_metrics` + `role_calibration_suggestions`; per-kernel decomposition + per-family/size reporting. |
 | `cli.py` | change | drop model-tuning flags; add `--hw-profile`. |
 | `cycle_estimator.py` | change | update re-export list (drop `ablation_metrics`, `role_calibration_suggestions`, `mismatch_reason`); keep the `tt-lang-sim-cycles` entry. |
@@ -182,18 +182,19 @@ Under ideal-peak there are **no hardware labels**, so v1.0 cannot be scored by a
 - [x] Add `HardwareProfile` named registry (`get_profile`, scaffold, provisional rates)
 - [ ] Fill the spec table for the chosen target part (pending decision #1)
 - [ ] Each rate documents its source (datasheet vs known constant)
-- [ ] Custom-profile file loader (deferred until field set settles / sweeps need it)
+- [x] Custom-profile file loader — `load_profile_json` / `resolve_profile`; `--hw-profile <name|path.json>`
 
 ### Reporting (`cycle_tools/report.py`)
-- [ ] Remove `ablation_metrics` and `role_calibration_suggestions`
-- [ ] Per-kernel decomposition (compute vs movement, dominant term, bound class)
+- [x] Per-kernel decomposition — compute vs movement, cycles, bound class (`print_peak_report`)
 - [ ] Per-family + per-size reporting (never a single global number)
-- [ ] Update `feature_provenance` to hardware-derived sources
+- [ ] Remove `ablation_metrics` and `role_calibration_suggestions` (Step 7 / contract)
+- [ ] Update `feature_provenance` to hardware-derived sources (Step 7 / contract)
 
 ### CLI & entry (`cycle_tools/cli.py`, `cycle_estimator.py`, `cycle_tools/__init__.py`)
-- [ ] Drop model-tuning flags; add `--hw-profile`
-- [ ] Update `cycle_estimator.py` re-exports (drop removed symbols)
-- [ ] Update `cycle_tools/__init__.py` exports
+- [x] Add `--model peak` + `--hw-profile` (v1.0 path reachable alongside v0.1)
+- [ ] Drop v0.1 model-tuning flags + make peak the default (Step 7 / contract)
+- [ ] Update `cycle_estimator.py` re-exports (drop removed symbols) (Step 7 / contract)
+- [ ] Update `cycle_tools/__init__.py` exports (Step 7 / contract)
 
 ### Validation
 - [x] Invariant tests (monotonicity, bounds, overlap=max-not-sum, determinism, zero-work) as regression fixtures

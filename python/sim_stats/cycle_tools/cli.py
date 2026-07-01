@@ -9,10 +9,11 @@ import argparse
 import sys
 from pathlib import Path
 
+from .hardware_profile import DEFAULT, resolve_profile
 from .model import estimate_kernel_cycles, group_kernel_estimates
-from .parse import extract_kernel_features, parse_trace
-from .report import print_report, write_json_report
-from .types import EstimatorConfig, KernelEstimate
+from .parse import extract_kernel_features, extract_kernel_work, parse_trace
+from .report import print_peak_report, print_report, write_json_report
+from .types import EstimatorConfig, KernelEstimate, KernelWork
 
 
 def build_estimation_pipeline(
@@ -23,6 +24,12 @@ def build_estimation_pipeline(
     events = parse_trace(trace_path)
     features = extract_kernel_features(events)
     return estimate_kernel_cycles(features, config, include_zero_kernels)
+
+
+def build_peak_pipeline(trace_path: Path) -> list[KernelWork]:
+    """v1.0 analytical peak pipeline: trace -> per-kernel work records."""
+    events = parse_trace(trace_path)
+    return list(extract_kernel_work(events).values())
 
 
 def main() -> None:
@@ -42,6 +49,23 @@ def main() -> None:
         "trace",
         metavar="FILE",
         help="JSON Lines trace file produced by tt-lang-sim --trace",
+    )
+    parser.add_argument(
+        "--model",
+        choices=("phase", "peak"),
+        default="phase",
+        help=(
+            "Estimation model: 'phase' (v0.1, default) or 'peak' "
+            "(v1.0 analytical ideal-peak, hardware-cycle oriented)"
+        ),
+    )
+    parser.add_argument(
+        "--hw-profile",
+        default=DEFAULT.name,
+        help=(
+            "Hardware profile for the peak model: a built-in name or a path to a "
+            ".json profile file (default: %(default)s)"
+        ),
     )
     parser.add_argument(
         "--json-out",
@@ -149,6 +173,22 @@ def main() -> None:
     if not trace_path.exists():
         print(f"Error: trace file not found: {trace_path}", file=sys.stderr)
         sys.exit(1)
+
+    if args.model == "peak":
+        try:
+            hw = resolve_profile(args.hw_profile)
+        except (KeyError, FileNotFoundError, ValueError) as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            sys.exit(1)
+        if args.json_out is not None:
+            print(
+                "note: --json-out is not yet supported for the peak model; "
+                "printing report only.",
+                file=sys.stderr,
+            )
+        kernels = build_peak_pipeline(trace_path)
+        print_peak_report(kernels, hw)
+        return
 
     config = EstimatorConfig(
         flops_per_tile=args.flops_per_tile,

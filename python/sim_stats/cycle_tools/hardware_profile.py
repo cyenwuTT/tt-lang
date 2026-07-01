@@ -4,19 +4,24 @@
 """Hardware spec profiles for the v1.0 analytical peak cycle model.
 
 Canonical, reviewed peak-rate profiles for known parts live here as typed
-``HardwareProfile`` objects (the source of truth), looked up by name.
+``HardwareProfile`` objects (the source of truth), looked up by name via
+:func:`get_profile`. Custom/experimental profiles can be supplied as a JSON file
+and loaded with :func:`load_profile_json`; :func:`resolve_profile` accepts either
+a built-in name or a ``.json`` path, which is what the CLI ``--hw-profile`` uses.
 
-A file-based loader (e.g. JSON) for custom/experimental profiles is intentionally
-deferred: the ``HardwareProfile`` fields are still in flux pending the target-part
-decision, and the only consumer (sensitivity sweeps) comes later — designing a
-serialization format now would lock it before the requirements are known.
+The JSON mirrors the dataclass fields, with ``compute_rate`` encoded as a list of
+``[op_type, dtype, rate]`` triples (JSON has no tuple keys). It is a thin
+serialization of ``HardwareProfile`` and may evolve as the field set does.
 
-NOTE: the rates below are PROVISIONAL placeholders pending the target-part
-decision (Wormhole / Blackhole). They are not yet hardware-validated and must
-not be trusted for real estimates.
+NOTE: the built-in rates below are PROVISIONAL placeholders pending the
+target-part decision (Wormhole / Blackhole). They are not yet hardware-validated
+and must not be trusted for real estimates.
 """
 
 from __future__ import annotations
+
+import json
+from pathlib import Path
 
 from .types import HardwareProfile
 
@@ -45,3 +50,50 @@ def get_profile(name: str) -> HardwareProfile:
     except KeyError:
         known = ", ".join(sorted(_PROFILES))
         raise KeyError(f"unknown hardware profile {name!r}; known: {known}") from None
+
+
+def load_profile_json(path: Path | str) -> HardwareProfile:
+    """Load a custom HardwareProfile from a JSON file.
+
+    JSON keys mirror the dataclass fields; ``compute_rate`` is a list of
+    ``[op_type, dtype, rate]`` triples. Raises FileNotFoundError / ValueError
+    with the file path on a missing or malformed profile.
+    """
+    p = Path(path)
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        raise FileNotFoundError(f"hardware profile file not found: {p}") from None
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"invalid JSON in hardware profile {p}: {exc}") from None
+
+    try:
+        compute_rate = {
+            (str(op), str(dt)): float(rate)
+            for op, dt, rate in data.get("compute_rate", [])
+        }
+        return HardwareProfile(
+            name=str(data.get("name", p.stem)),
+            compute_rate=compute_rate,
+            compute_rate_default=float(data["compute_rate_default"]),
+            noc_bw={str(k): float(v) for k, v in data["noc_bw"].items()},
+            noc_latency={
+                str(k): float(v) for k, v in data.get("noc_latency", {}).items()
+            },
+            clock_ghz=float(data["clock_ghz"]),
+            bytes_per_tile=float(data["bytes_per_tile"]),
+            dm_engines=int(data.get("dm_engines", 1)),
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError(f"malformed hardware profile {p}: {exc}") from None
+
+
+def resolve_profile(name_or_path: str) -> HardwareProfile:
+    """Resolve a built-in profile name, or a path to a JSON profile file.
+
+    A value ending in ``.json`` is loaded from file; otherwise it is looked up
+    as a built-in name. Used by the CLI ``--hw-profile`` option.
+    """
+    if name_or_path.endswith(".json"):
+        return load_profile_json(name_or_path)
+    return get_profile(name_or_path)

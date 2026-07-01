@@ -32,14 +32,20 @@ def op_cycles(op: OpWork, hw: HardwareProfile) -> float:
     return 0.0
 
 
+def kernel_paths(work: KernelWork, hw: HardwareProfile) -> tuple[float, float]:
+    """Return the (compute_path, movement_path) cycle totals for a kernel."""
+    compute_path = sum(op_cycles(o, hw) for o in work.ops if o.kind == "compute")
+    movement_path = sum(op_cycles(o, hw) for o in work.ops if o.kind == "movement")
+    return compute_path, movement_path
+
+
 def kernel_cycles(work: KernelWork, hw: HardwareProfile) -> float:
     """Ideal-peak kernel cycles: the larger of the compute and movement paths.
 
     The compute engine and the data-movement engine run concurrently, so the
     kernel time is ``max`` of the two serial paths, not their sum.
     """
-    compute_path = sum(op_cycles(o, hw) for o in work.ops if o.kind == "compute")
-    movement_path = sum(op_cycles(o, hw) for o in work.ops if o.kind == "movement")
+    compute_path, movement_path = kernel_paths(work, hw)
     return max(compute_path, movement_path)
 
 

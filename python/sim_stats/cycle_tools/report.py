@@ -11,7 +11,14 @@ from dataclasses import asdict
 from pathlib import Path
 
 from .model import group_kernel_estimates
-from .types import EstimatorConfig, KernelEstimate, KernelGroupEstimate
+from .schedule import kernel_paths, program_cycles
+from .types import (
+    EstimatorConfig,
+    HardwareProfile,
+    KernelEstimate,
+    KernelGroupEstimate,
+    KernelWork,
+)
 from ..utils import format_float
 
 
@@ -23,12 +30,14 @@ def _weighted_abs_error_pct(pairs: list[tuple[float, int]]) -> float:
     for estimate, measured in pairs:
         if measured <= 0:
             continue
-        numerator += abs((estimate - float(measured)) / float(measured) * 100.0) * measured
+        numerator += (
+            abs((estimate - float(measured)) / float(measured) * 100.0) * measured
+        )
         denominator += measured
-   
+
     if denominator == 0:
         return math.nan
-   
+
     return numerator / denominator
 
 
@@ -49,7 +58,9 @@ def ablation_metrics(rows: list[KernelEstimate]) -> dict[str, float]:
         blocked_share_den += max(row.estimated_cycles, 0.0)
 
     blocked_share_pct = (
-        blocked_share_num / blocked_share_den * 100.0 if blocked_share_den > 0.0 else math.nan
+        blocked_share_num / blocked_share_den * 100.0
+        if blocked_share_den > 0.0
+        else math.nan
     )
 
     return {
@@ -96,13 +107,13 @@ def role_calibration_suggestions(rows: list[KernelEstimate]) -> dict[str, float]
         base_sum[role] += non_blocked_base
 
     out: dict[str, float] = {}
-    
+
     for role in ("compute", "read", "write", "other"):
         if base_sum[role] > 0.0:
             out[role] = measured_sum[role] / base_sum[role]
         else:
             out[role] = math.nan
-    
+
     return out
 
 
@@ -115,9 +126,9 @@ def print_report(rows: list[KernelEstimate], threshold_pct: float) -> None:
         f"{'Kernel':<28} {'Role':<8} {'Measured':>10} {'Estimated':>10} "
         f"{'Err%':>8} {'Eff':>7} {'M-Eff':>7} {'OI':>8} {'Bound':<14}"
     )
-    
+
     width = len(header)
-    
+
     print("\n" + "=" * width)
     print("TT-Lang Trace Cycle Estimation (v0.1 roofline model)")
     print("=" * width)
@@ -149,24 +160,24 @@ def print_report(rows: list[KernelEstimate], threshold_pct: float) -> None:
     wape = _weighted_abs_error_pct(full_pairs)
 
     print("-" * width)
-    
+
     if math.isfinite(wape):
         print(f"Weighted abs error %: {format_float(wape)}")
     else:
         print("Weighted abs error %: n/a")
-    
+
     print(
         "Kernels above mismatch threshold "
         f"({format_float(threshold_pct)}%): {above_threshold_count}/{len(rows)}"
     )
-    
+
     print(f"Kernels that need lower-level model: {refine_count}/{len(rows)}")
-    
+
     mismatch_rows = [r for r in rows if r.abs_error_pct > threshold_pct]
     mismatch_rows.sort(key=lambda r: r.abs_error_pct, reverse=True)
-    
+
     print("\nMismatch notes (top 15 by abs error):")
-    
+
     for row in mismatch_rows[:15]:
         print(f"- {row.kernel}: {row.mismatch_reason}")
     if len(mismatch_rows) > 15:
@@ -176,24 +187,24 @@ def print_report(rows: list[KernelEstimate], threshold_pct: float) -> None:
         f"{'Node':<28} {'Kernels':>7} {'Measured':>10} {'Estimated':>10} {'Err%':>8}"
     )
     group_width = len(group_header)
-    
+
     print("\n" + "=" * group_width)
     print("Kernel-Level Group Totals (heuristic critical-path v0.1)")
     print("=" * group_width)
     print(group_header)
     print("-" * group_width)
-    
+
     for group in groups:
         print(
             f"{group.node:<28} {group.kernel_count:>7d} "
             f"{group.measured_cycles:>10d} {format_float(group.estimated_cycles):>10} "
             f"{format_float(group.signed_error_pct):>8}"
         )
-    
+
     print("-" * group_width)
 
     ablation = ablation_metrics(rows)
-    
+
     print("\nAblation Diagnostics (internal)")
     print(f"- Full model WAPE%: {format_float(ablation['full_wape_pct'])}")
     print(f"- No-blocked-term WAPE%: {format_float(ablation['no_blocked_wape_pct'])}")
@@ -204,13 +215,13 @@ def print_report(rows: list[KernelEstimate], threshold_pct: float) -> None:
     )
 
     provenance = feature_provenance()
-    
+
     print("\nFeature Provenance Audit (internal)")
     for key in sorted(provenance):
         print(f"- {key}: {provenance[key]}")
 
     role_scales = role_calibration_suggestions(rows)
-    
+
     print("\nCalibration Suggestions (non-blocked base -> measured)")
     print("- Use profiler/perf-summary wall-time as ground truth when available.")
     for role in ("compute", "read", "write", "other"):
@@ -230,3 +241,42 @@ def write_json_report(
     }
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
+
+# ---------------------------------------------------------------------------
+# v1.0 analytical peak model report
+# ---------------------------------------------------------------------------
+
+
+def print_peak_report(kernels: list[KernelWork], hw: HardwareProfile) -> None:
+    """Print the v1.0 ideal-peak estimate: per-kernel compute/movement decomposition.
+
+    There is no error/WAPE column: ideal-peak has no measured-cycle ground truth
+    to score against (see docs/development/CycleEstimator.md).
+    """
+    width = 78
+    print("\n" + "=" * width)
+    print(f"Cycle Estimate — ideal-peak model (profile: {hw.name})")
+    print("=" * width)
+    print(f"{'Kernel':<28} {'Compute':>12} {'Movement':>12} {'Cycles':>12}  Bound")
+    print("-" * width)
+
+    total_compute = 0.0
+    for kw in sorted(kernels, key=lambda k: k.kernel):
+        compute, movement = kernel_paths(kw, hw)
+        total_compute += compute
+        cyc = max(compute, movement)
+        bound = "compute-bound" if compute > movement else "memory-bound"
+        print(
+            f"{kw.kernel:<28} {compute:>12.2f} {movement:>12.2f} {cyc:>12.2f}  {bound}"
+        )
+
+    print("-" * width)
+    program = program_cycles(kernels, hw)
+    print(f"{'Program (throughput-bound)':<28} {'':>12} {'':>12} {program:>12.2f}")
+    print("=" * width)
+
+    if total_compute == 0.0:
+        print(
+            "note: compute path is 0 — no compute_op events in this trace "
+            "(sim instrumentation pending); movement-only estimate."
+        )
