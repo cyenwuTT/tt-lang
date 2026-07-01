@@ -185,13 +185,17 @@ Under ideal-peak there are **no hardware labels**, so v1.0 cannot be scored by a
 - [x] Custom-profile file loader — `load_profile_json` / `resolve_profile`; `--hw-profile <name|path.json>`
 
 ### Reporting (`cycle_tools/report.py`)
-- [x] Per-kernel decomposition — compute vs movement, cycles, bound class (`print_peak_report`)
+- [x] `PeakResult` canonical intermediate — render + JSON are pure functions of it
+- [x] Per-node **summary** (default, active nodes + utilization; `--include-zero-kernels` lists idle) + complete per-kernel **detailed** view (`--detailed`, all rows)
+- [x] Peak JSON export (`--json-out`) — full, self-describing (`tool`/`schema_version`/profile)
+- [x] Reload + re-render a saved report (`--view-report`), with report-vs-trace validation
 - [ ] Per-family + per-size reporting (never a single global number)
 - [ ] Remove `ablation_metrics` and `role_calibration_suggestions` (Step 7 / contract)
 - [ ] Update `feature_provenance` to hardware-derived sources (Step 7 / contract)
 
 ### CLI & entry (`cycle_tools/cli.py`, `cycle_estimator.py`, `cycle_tools/__init__.py`)
 - [x] Add `--model peak` + `--hw-profile` (v1.0 path reachable alongside v0.1)
+- [x] Add `--detailed`, `--json-out` (peak), `--view-report` (render saved report, no trace)
 - [ ] Drop v0.1 model-tuning flags + make peak the default (Step 7 / contract)
 - [ ] Update `cycle_estimator.py` re-exports (drop removed symbols) (Step 7 / contract)
 - [ ] Update `cycle_tools/__init__.py` exports (Step 7 / contract)

@@ -10,10 +10,21 @@ import sys
 from pathlib import Path
 
 from .hardware_profile import DEFAULT, resolve_profile
-from .model import estimate_kernel_cycles, group_kernel_estimates
+from .model import (
+    build_peak_result,
+    estimate_kernel_cycles,
+    group_kernel_estimates,
+)
 from .parse import extract_kernel_features, extract_kernel_work, parse_trace
-from .report import print_peak_report, print_report, write_json_report
-from .types import EstimatorConfig, KernelEstimate, KernelWork
+from .report import (
+    load_peak_result,
+    print_peak_report,
+    print_peak_summary,
+    print_report,
+    write_json_report,
+    write_peak_json_report,
+)
+from .types import EstimatorConfig, KernelEstimate, KernelWork, PeakResult
 
 
 def build_estimation_pipeline(
@@ -48,7 +59,20 @@ def main() -> None:
     parser.add_argument(
         "trace",
         metavar="FILE",
+        nargs="?",
+        default=None,
         help="JSON Lines trace file produced by tt-lang-sim --trace",
+    )
+    parser.add_argument(
+        "--view-report",
+        metavar="REPORT.json",
+        default=None,
+        help="Render a previously saved peak JSON report (no trace needed)",
+    )
+    parser.add_argument(
+        "--detailed",
+        action="store_true",
+        help="Peak model: show the full per-kernel table instead of the per-node summary",
     )
     parser.add_argument(
         "--model",
@@ -169,6 +193,27 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    def _render_peak(result: PeakResult) -> None:
+        if args.detailed:
+            # Detailed = complete: every kernel, including zero rows.
+            print_peak_report(result)
+        else:
+            # Summary = active nodes; --include-zero-kernels also lists idle ones.
+            print_peak_summary(result, include_zero=args.include_zero_kernels)
+
+    # View a previously saved peak report (no trace, no recompute).
+    if args.view_report is not None:
+        try:
+            result = load_peak_result(args.view_report)
+        except (FileNotFoundError, ValueError) as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            sys.exit(1)
+        _render_peak(result)
+        return
+
+    if args.trace is None:
+        parser.error("a trace FILE is required (or use --view-report REPORT.json)")
+
     trace_path = Path(args.trace).resolve()
     if not trace_path.exists():
         print(f"Error: trace file not found: {trace_path}", file=sys.stderr)
@@ -180,14 +225,13 @@ def main() -> None:
         except (KeyError, FileNotFoundError, ValueError) as exc:
             print(f"Error: {exc}", file=sys.stderr)
             sys.exit(1)
+        result = build_peak_result(build_peak_pipeline(trace_path), hw)
+        _render_peak(result)
         if args.json_out is not None:
-            print(
-                "note: --json-out is not yet supported for the peak model; "
-                "printing report only.",
-                file=sys.stderr,
-            )
-        kernels = build_peak_pipeline(trace_path)
-        print_peak_report(kernels, hw)
+            out_path = args.json_out.resolve()
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            write_peak_json_report(out_path, result)
+            print(f"\nWrote JSON report: {out_path}")
         return
 
     config = EstimatorConfig(

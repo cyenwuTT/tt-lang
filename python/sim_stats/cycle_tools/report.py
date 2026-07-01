@@ -11,15 +11,14 @@ from dataclasses import asdict
 from pathlib import Path
 
 from .model import group_kernel_estimates
-from .schedule import kernel_paths, program_cycles
 from .types import (
     EstimatorConfig,
-    HardwareProfile,
     KernelEstimate,
     KernelGroupEstimate,
-    KernelWork,
+    PeakKernel,
+    PeakResult,
 )
-from ..utils import format_float
+from ..utils import format_float, node_sort_key
 
 
 # WAPE formula (weighted by measured cycles).
@@ -243,40 +242,127 @@ def write_json_report(
 
 
 # ---------------------------------------------------------------------------
-# v1.0 analytical peak model report
+# v1.0 analytical peak model — render / serialize (all pure over PeakResult)
 # ---------------------------------------------------------------------------
 
+_PEAK_TOOL = "tt-lang-sim-cycles"
+_PEAK_SCHEMA_VERSION = 1
+_PEAK_W = 78
 
-def print_peak_report(kernels: list[KernelWork], hw: HardwareProfile) -> None:
-    """Print the v1.0 ideal-peak estimate: per-kernel compute/movement decomposition.
 
-    There is no error/WAPE column: ideal-peak has no measured-cycle ground truth
-    to score against (see docs/development/CycleEstimator.md).
-    """
-    width = 78
-    print("\n" + "=" * width)
-    print(f"Cycle Estimate — ideal-peak model (profile: {hw.name})")
-    print("=" * width)
-    print(f"{'Kernel':<28} {'Compute':>12} {'Movement':>12} {'Cycles':>12}  Bound")
-    print("-" * width)
+def _peak_header(result: PeakResult, unit: str) -> None:
+    print("\n" + "=" * _PEAK_W)
+    print(f"Cycle Estimate — ideal-peak model (profile: {result.profile_name})")
+    print("=" * _PEAK_W)
+    print(f"{unit:<28} {'Compute':>12} {'Movement':>12} {'Cycles':>12}  Bound")
+    print("-" * _PEAK_W)
 
-    total_compute = 0.0
-    for kw in sorted(kernels, key=lambda k: k.kernel):
-        compute, movement = kernel_paths(kw, hw)
-        total_compute += compute
-        cyc = max(compute, movement)
-        bound = "compute-bound" if compute > movement else "memory-bound"
-        print(
-            f"{kw.kernel:<28} {compute:>12.2f} {movement:>12.2f} {cyc:>12.2f}  {bound}"
-        )
 
-    print("-" * width)
-    program = program_cycles(kernels, hw)
-    print(f"{'Program (throughput-bound)':<28} {'':>12} {'':>12} {program:>12.2f}")
-    print("=" * width)
-
-    if total_compute == 0.0:
+def _peak_footer(result: PeakResult) -> None:
+    print("-" * _PEAK_W)
+    print(
+        f"{'Program (throughput-bound)':<28} {'':>12} {'':>12} "
+        f"{result.program_cycles:>12.2f}"
+    )
+    idle = result.total_nodes - result.active_nodes
+    print(f"Active nodes: {result.active_nodes} / {result.total_nodes}   ({idle} idle)")
+    print("=" * _PEAK_W)
+    if sum(k.compute_cycles for k in result.kernels) == 0.0:
         print(
             "note: compute path is 0 — no compute_op events in this trace "
             "(sim instrumentation pending); movement-only estimate."
         )
+
+
+def print_peak_report(result: PeakResult) -> None:
+    """Detailed per-kernel view of the peak result — complete, includes zero rows."""
+    _peak_header(result, "Kernel")
+    for pk in result.kernels:
+        print(
+            f"{pk.kernel:<28} {pk.compute_cycles:>12.2f} {pk.movement_cycles:>12.2f} "
+            f"{pk.cycles:>12.2f}  {pk.bound}"
+        )
+    _peak_footer(result)
+
+
+def print_peak_summary(result: PeakResult, include_zero: bool = False) -> None:
+    """Clean per-node rollup of the peak result (the default view).
+
+    Each node's columns are the max over its kernels (concurrent RISCs), matching
+    the program combiner.
+    """
+    per_node: dict[str, list[float]] = {}
+    for pk in result.kernels:
+        entry = per_node.setdefault(pk.node, [0.0, 0.0, 0.0])
+        entry[0] = max(entry[0], pk.compute_cycles)
+        entry[1] = max(entry[1], pk.movement_cycles)
+        entry[2] = max(entry[2], pk.cycles)
+
+    _peak_header(result, "Node")
+    for node in sorted(per_node, key=node_sort_key):
+        compute, movement, cyc = per_node[node]
+        if not include_zero and cyc == 0.0:
+            continue
+        bound = "compute-bound" if compute > movement else "memory-bound"
+        print(f"{node:<28} {compute:>12.2f} {movement:>12.2f} {cyc:>12.2f}  {bound}")
+    _peak_footer(result)
+
+
+def write_peak_json_report(path: Path, result: PeakResult) -> None:
+    """Serialize the full, self-describing peak result (for analysis reuse)."""
+    payload = {
+        "tool": _PEAK_TOOL,
+        "schema_version": _PEAK_SCHEMA_VERSION,
+        "model": "peak-ideal",
+        "profile": result.profile,
+        "program_cycles": result.program_cycles,
+        "total_nodes": result.total_nodes,
+        "active_nodes": result.active_nodes,
+        "kernels": [asdict(k) for k in result.kernels],
+    }
+    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
+def load_peak_result(path: Path | str) -> PeakResult:
+    """Load a saved peak report JSON back into a PeakResult, with validation.
+
+    Raises FileNotFoundError if the file is missing, or ValueError if it is not a
+    tt-lang-sim-cycles report (including the common mistake of passing a raw
+    JSON-Lines trace instead of a saved report).
+    """
+    p = Path(path)
+    try:
+        text = p.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        raise FileNotFoundError(f"report file not found: {p}") from None
+
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        raise ValueError(
+            f"{p} is not a cycle report: not a single JSON object "
+            "(a raw --trace file is JSON Lines, not a report)"
+        ) from None
+
+    if (
+        not isinstance(data, dict)
+        or data.get("tool") != _PEAK_TOOL
+        or "kernels" not in data
+    ):
+        raise ValueError(
+            f"{p} is not a tt-lang-sim-cycles report (missing tool marker or kernels)"
+        )
+
+    try:
+        kernels = [PeakKernel(**k) for k in data["kernels"]]
+        profile = data.get("profile", {})
+        return PeakResult(
+            profile_name=profile.get("name", data.get("profile_name", "?")),
+            profile=profile,
+            program_cycles=float(data["program_cycles"]),
+            total_nodes=int(data.get("total_nodes", 0)),
+            active_nodes=int(data.get("active_nodes", 0)),
+            kernels=kernels,
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError(f"malformed cycle report {p}: {exc}") from None

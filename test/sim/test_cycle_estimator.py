@@ -18,6 +18,7 @@ import math
 import pytest
 
 from python.sim_stats.cycle_tools.model import (
+    build_peak_result,
     estimate_kernel_cycles,
     group_kernel_estimates,
     mismatch_reason,
@@ -30,7 +31,12 @@ from python.sim_stats.cycle_tools.hardware_profile import (
     load_profile_json,
     resolve_profile,
 )
-from python.sim_stats.cycle_tools.report import print_peak_report
+from python.sim_stats.cycle_tools.report import (
+    load_peak_result,
+    print_peak_report,
+    print_peak_summary,
+    write_peak_json_report,
+)
 from python.sim_stats.cycle_tools.schedule import (
     kernel_cycles,
     kernel_paths,
@@ -634,7 +640,7 @@ def test_peak_report_shows_decomposition_and_program_total(capsys) -> None:
         ),
     ]
 
-    print_peak_report(kernels, hw)
+    print_peak_report(build_peak_result(kernels, hw))
     out = capsys.readouterr().out
 
     assert "ideal-peak model" in out
@@ -652,10 +658,71 @@ def test_peak_report_notes_empty_compute_path(capsys) -> None:
         ),
     ]
 
-    print_peak_report(kernels, hw)
+    print_peak_report(build_peak_result(kernels, hw))
     out = capsys.readouterr().out
 
     assert "compute path is 0" in out
+
+
+def test_peak_summary_rolls_up_per_node_and_reports_utilization(capsys) -> None:
+    hw = _hw()
+    kernels = [
+        KernelWork(
+            kernel="node0-read",
+            ops=[OpWork(kind="movement", op_type="copy", tiles=4, locality="dram")],
+        ),
+        KernelWork(
+            kernel="node0-compute",
+            ops=[OpWork(kind="compute", op_type="matmul", dtype="bf16", tiles=10)],
+        ),
+        KernelWork(kernel="node1-read", ops=[]),  # idle node
+        KernelWork(kernel="node1-compute", ops=[]),
+    ]
+
+    print_peak_summary(build_peak_result(kernels, hw))
+    out = capsys.readouterr().out
+
+    assert "Node" in out
+    assert "node0" in out
+    assert "Active nodes: 1 / 2" in out
+    assert "node1" not in out  # idle node hidden by default
+
+
+def test_peak_json_write_then_load_round_trip(tmp_path) -> None:
+    hw = _hw()
+    kernels = [
+        KernelWork(
+            kernel="node0-read",
+            ops=[OpWork(kind="movement", op_type="copy", tiles=4, locality="dram")],
+        ),
+    ]
+    result = build_peak_result(kernels, hw)
+
+    p = tmp_path / "report.json"
+    write_peak_json_report(p, result)
+    loaded = load_peak_result(p)
+
+    assert loaded.profile_name == result.profile_name
+    assert loaded.program_cycles == result.program_cycles
+    assert [k.kernel for k in loaded.kernels] == [k.kernel for k in result.kernels]
+    assert loaded.kernels[0].movement_cycles == 4.0
+
+
+def test_load_peak_result_rejects_non_report(tmp_path) -> None:
+    p = tmp_path / "other.json"
+    p.write_text('{"foo": 1}', encoding="utf-8")
+    with pytest.raises(ValueError):
+        load_peak_result(p)
+
+
+def test_load_peak_result_rejects_jsonl_trace(tmp_path) -> None:
+    # A raw trace is JSON Lines (multiple objects), not a single report object.
+    p = tmp_path / "trace.jsonl"
+    p.write_text(
+        '{"event": "kernel_start"}\n{"event": "kernel_end"}\n', encoding="utf-8"
+    )
+    with pytest.raises(ValueError):
+        load_peak_result(p)
 
 
 # ---------------------------------------------------------------------------

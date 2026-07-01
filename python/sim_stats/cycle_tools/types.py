@@ -168,3 +168,33 @@ class KernelWork:
     ops: list[OpWork] = field(default_factory=list[OpWork])
     # DFB / pipe names this kernel blocks on; filled by the dependency pass.
     blocks_on: list[str] = field(default_factory=list[str])
+
+
+@dataclass(frozen=True)
+class PeakKernel:
+    """Per-kernel decomposition from the v1.0 peak model (a rendered result row)."""
+
+    kernel: str
+    node: str
+    role: str
+    compute_cycles: float
+    movement_cycles: float
+    cycles: float
+    bound: str
+
+
+@dataclass(frozen=True)
+class PeakResult:
+    """Canonical v1.0 peak-model result: the intermediate that render + JSON share.
+
+    Produced fresh from a trace (:func:`model.build_peak_result`) or loaded back
+    from a saved JSON report (:func:`report.load_peak_result`). All views
+    (summary / detailed / JSON) are pure functions of this.
+    """
+
+    profile_name: str
+    profile: dict[str, Any]  # resolved rates, embedded for reproducibility
+    program_cycles: float
+    total_nodes: int
+    active_nodes: int
+    kernels: list[PeakKernel] = field(default_factory=list[PeakKernel])
