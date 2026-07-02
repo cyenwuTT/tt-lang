@@ -234,6 +234,34 @@ def _write_jsonl_trace(path: Path, events: list) -> None:
             f.write(json.dumps(record) + "\n")
 
 
+def _print_cycle_estimate(events: list) -> None:
+    """Print an ideal-peak cycle estimate from in-memory trace events.
+
+    The estimator lives in the ``sim_stats`` package (a consumer of the trace
+    format); we feed it the events already on the context, no file round-trip.
+    Imported lazily so a normal run pays nothing and a missing estimator degrades
+    to a warning rather than a hard failure.
+    """
+    try:
+        from sim_stats.cycles.hardware_profile import DEFAULT
+        from sim_stats.cycles.model import build_estimate
+        from sim_stats.cycles.parse import extract_kernel_work
+        from sim_stats.cycles.report import print_summary
+        from sim_stats.cycles.types import TraceEvent as EstimatorTraceEvent
+    except ImportError as exc:
+        print(f"--cycles: cycle estimator unavailable ({exc})", file=sys.stderr)
+        return
+
+    est_events = [
+        EstimatorTraceEvent(
+            tick=ev.tick, event=ev.event, kernel=ev.kernel, data=ev.data
+        )
+        for ev in events
+    ]
+    work = list(extract_kernel_work(est_events).values())
+    print_summary(build_estimate(work, DEFAULT))
+
+
 def main() -> None:
     argv = sys.argv[1:]
 
@@ -332,6 +360,17 @@ def main() -> None:
         help=(
             "Comma-separated list of event categories to suppress. "
             "Mutually exclusive with --trace-events. Requires --trace."
+        ),
+    )
+
+    parser.add_argument(
+        "--cycles",
+        action="store_true",
+        dest="cycles",
+        help=(
+            "After the run, print an ideal-peak cycle estimate from the trace "
+            "(default hardware profile). Combine with --trace to also save the "
+            "trace; use tt-lang-sim-cycles for profile/report options."
         ),
     )
 
@@ -452,7 +491,7 @@ def main() -> None:
         )
         sys.exit(1)
 
-    if args.trace:
+    if args.trace or args.cycles:
         from .trace import ALL_CATEGORIES, set_tracing
 
         if args.trace_events:
@@ -480,6 +519,11 @@ def main() -> None:
         else:
             trace_set = ALL_CATEGORIES
 
+        if args.cycles:
+            # The estimator needs these; record them even if --trace-events narrowed
+            # the set, or the estimate would be silently incomplete.
+            trace_set = trace_set | frozenset({"compute", "copy"})
+
         set_tracing(trace_set)
 
     # Run the target
@@ -489,11 +533,15 @@ def main() -> None:
             sys.exit(1)
         run_file(args.target, args.script_args)
     finally:
-        # Write trace events to file if requested
-        if args.trace:
+        # Write the trace and/or estimate cycles from the same event buffer.
+        if args.trace or args.cycles:
             from .context import get_context
 
-            _write_jsonl_trace(Path(args.trace), get_context().trace_events)
+            events = get_context().trace_events
+            if args.trace:
+                _write_jsonl_trace(Path(args.trace), events)
+            if args.cycles:
+                _print_cycle_estimate(events)
 
 
 if __name__ == "__main__":
