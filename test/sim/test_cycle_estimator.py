@@ -1,41 +1,28 @@
 # SPDX-FileCopyrightText: (c) 2026 Tenstorrent AI ULC
 #
 # SPDX-License-Identifier: Apache-2.0
-"""Unit tests for sim_stats cycle estimator logic.
+"""Unit tests for the sim_stats cycle estimator (analytical ideal-peak model).
 
-Tests cover model behavior and parser edge cases:
-- include/exclude zero-kernel rows
-- bound classification tie behavior
-- mismatch reason gating branches
-- compute tile proxy and roofline contribution
-- group critical-path aggregation
-- feature extraction from event spans
+Covers: per-op cost, kernel/program combiners, invariants, the compute path
+(against synthetic compute_op events), report rendering, JSON round-trip, and
+hardware-profile loading.
 """
 
 import json
-import math
 
 import pytest
 
-from python.sim_stats.cycle_tools.model import (
-    build_peak_result,
-    estimate_kernel_cycles,
-    group_kernel_estimates,
-    mismatch_reason,
-)
-from python.sim_stats.cycle_tools.parse import (
-    extract_kernel_features,
-    extract_kernel_work,
-)
 from python.sim_stats.cycle_tools.hardware_profile import (
     load_profile_json,
     resolve_profile,
 )
+from python.sim_stats.cycle_tools.model import build_estimate
+from python.sim_stats.cycle_tools.parse import extract_kernel_work
 from python.sim_stats.cycle_tools.report import (
-    load_peak_result,
-    print_peak_report,
-    print_peak_summary,
-    write_peak_json_report,
+    load_estimate,
+    print_detailed,
+    print_summary,
+    write_json,
 )
 from python.sim_stats.cycle_tools.schedule import (
     kernel_cycles,
@@ -44,282 +31,11 @@ from python.sim_stats.cycle_tools.schedule import (
     program_cycles,
 )
 from python.sim_stats.cycle_tools.types import (
-    EstimatorConfig,
     HardwareProfile,
-    KernelEstimate,
-    KernelFeatures,
     KernelWork,
     OpWork,
+    TraceEvent,
 )
-from python.sim_stats.cycle_tools.types import TraceEvent
-
-
-# ---------------------------------------------------------------------------
-# Model tests
-# ---------------------------------------------------------------------------
-
-
-def test_zero_kernels_filtered_by_default() -> None:
-    features = {
-        "node0-compute": KernelFeatures(kernel="node0-compute", role="compute"),
-    }
-
-    rows = estimate_kernel_cycles(
-        features, EstimatorConfig(), include_zero_kernels=False
-    )
-
-    assert rows == []
-
-
-def test_zero_kernels_included_when_enabled() -> None:
-    features = {
-        "node0-compute": KernelFeatures(kernel="node0-compute", role="compute"),
-    }
-
-    rows = estimate_kernel_cycles(
-        features, EstimatorConfig(), include_zero_kernels=True
-    )
-
-    assert len(rows) == 1
-    assert rows[0].measured_cycles == 0
-    assert rows[0].estimated_cycles == 0.0
-
-
-def test_tied_roofline_defaults_to_memory_bound() -> None:
-    features = {
-        "node0-compute": KernelFeatures(
-            kernel="node0-compute",
-            role="compute",
-            measured_cycles=10,
-            wait_tiles=1,
-            local_l1_tiles=1,
-        ),
-    }
-    config = EstimatorConfig(
-        flops_per_tile=1.0,
-        bytes_per_tile=1.0,
-        peak_flops_per_cycle=1.0,
-        memory_bytes_per_cycle=1.0,
-        wait_event_cycles=0.0,
-        reserve_event_cycles=0.0,
-        sync_event_cycles=0.0,
-        copy_call_cycles=0.0,
-    )
-
-    rows = estimate_kernel_cycles(features, config, include_zero_kernels=True)
-
-    assert len(rows) == 1
-    assert rows[0].compute_ceiling_cycles == rows[0].memory_ceiling_cycles
-    assert rows[0].bound_classification == "memory-bound"
-
-
-def test_mismatch_reason_stall_dominated_threshold() -> None:
-    feature = KernelFeatures(
-        kernel="node0-compute",
-        role="compute",
-        measured_cycles=100,
-        blocked_cycles=30,
-    )
-
-    reason = mismatch_reason(
-        feature=feature,
-        abs_error_pct=25.0,
-        threshold_pct=20.0,
-        blocked_cycles_term=0.0,
-        estimated_cycles=50.0,
-        compute_ceiling_cycles=1.0,
-        memory_ceiling_cycles=0.5,
-    )
-
-    assert reason.startswith("stall-dominated")
-
-
-def test_mismatch_reason_blocked_term_dominated_threshold() -> None:
-    feature = KernelFeatures(
-        kernel="node0-compute",
-        role="compute",
-        measured_cycles=100,
-        blocked_cycles=0,
-    )
-
-    reason = mismatch_reason(
-        feature=feature,
-        abs_error_pct=25.0,
-        threshold_pct=20.0,
-        blocked_cycles_term=5.0,
-        estimated_cycles=10.0,
-        compute_ceiling_cycles=1.0,
-        memory_ceiling_cycles=0.5,
-    )
-
-    assert reason.startswith("blocked-term-dominated")
-
-
-def test_compute_tile_proxy_uses_wait_plus_reserve_tiles() -> None:
-    features = {
-        "node0-compute": KernelFeatures(
-            kernel="node0-compute",
-            role="compute",
-            wait_tiles=2,
-            reserve_tiles=3,
-        ),
-    }
-    config = EstimatorConfig(
-        flops_per_tile=10.0,
-        peak_flops_per_cycle=10.0,
-        bytes_per_tile=1.0,
-        memory_bytes_per_cycle=1.0,
-        wait_event_cycles=0.0,
-        reserve_event_cycles=0.0,
-        sync_event_cycles=0.0,
-        copy_call_cycles=0.0,
-    )
-
-    rows = estimate_kernel_cycles(features, config, include_zero_kernels=True)
-
-    assert len(rows) == 1
-    assert rows[0].compute_ceiling_cycles == 5.0
-    assert rows[0].estimated_cycles == 5.0
-
-
-def test_group_aggregation_critical_path_formula() -> None:
-    rows = [
-        KernelEstimate(
-            kernel="node0-compute",
-            role="compute",
-            measured_cycles=100,
-            estimated_cycles=100.0,
-            abs_error_pct=0.0,
-            signed_error_pct=0.0,
-            roofline_efficiency=0.0,
-            measured_roofline_efficiency=0.0,
-            operational_intensity=math.inf,
-            bound_classification="compute-bound",
-            roofline_base_cycles=0.0,
-            compute_ceiling_cycles=0.0,
-            memory_ceiling_cycles=0.0,
-            stall_cycles=0.0,
-            sync_cycles=20.0,
-            copy_overhead_cycles=0.0,
-            blocked_cycles_term=0.0,
-            launch_cycles=0.0,
-            dfb_wait_block_contribution=0.0,
-            dfb_reserve_block_contribution=0.0,
-            copy_duration_contribution=0.0,
-            mismatch_reason="within-threshold",
-            needs_lower_level_model=False,
-        ),
-        KernelEstimate(
-            kernel="node0-read",
-            role="read",
-            measured_cycles=120,
-            estimated_cycles=80.0,
-            abs_error_pct=0.0,
-            signed_error_pct=0.0,
-            roofline_efficiency=0.0,
-            measured_roofline_efficiency=0.0,
-            operational_intensity=0.0,
-            bound_classification="memory-bound",
-            roofline_base_cycles=0.0,
-            compute_ceiling_cycles=0.0,
-            memory_ceiling_cycles=0.0,
-            stall_cycles=0.0,
-            sync_cycles=40.0,
-            copy_overhead_cycles=0.0,
-            blocked_cycles_term=0.0,
-            launch_cycles=0.0,
-            dfb_wait_block_contribution=0.0,
-            dfb_reserve_block_contribution=0.0,
-            copy_duration_contribution=0.0,
-            mismatch_reason="within-threshold",
-            needs_lower_level_model=False,
-        ),
-    ]
-
-    groups = group_kernel_estimates(rows)
-
-    assert len(groups) == 1
-    g = groups[0]
-    assert g.measured_cycles == 120
-    assert g.estimated_cycles == 120.0
-    assert g.signed_error_pct == 0.0
-    assert g.abs_error_pct == 0.0
-
-
-# ---------------------------------------------------------------------------
-# Parse/extraction tests
-# ---------------------------------------------------------------------------
-
-
-def test_extract_features_accumulates_wait_reserve_and_copy_durations() -> None:
-    events = [
-        TraceEvent(0, "kernel_start", "node0-compute", {}),
-        TraceEvent(1, "dfb_wait_begin", "node0-compute", {}),
-        TraceEvent(5, "dfb_wait_end", "node0-compute", {"tiles": 2}),
-        TraceEvent(6, "dfb_reserve_begin", "node0-compute", {}),
-        TraceEvent(10, "dfb_reserve_end", "node0-compute", {"tiles": 3}),
-        TraceEvent(12, "copy_start", "node0-compute", {}),
-        TraceEvent(
-            15,
-            "copy_end",
-            "node0-compute",
-            {"tiles": 4, "local_l1": 1, "remote_l1": 2, "dram": 1},
-        ),
-        TraceEvent(16, "kernel_end", "node0-compute", {}),
-    ]
-
-    features = extract_kernel_features(events)
-    f = features["node0-compute"]
-
-    assert f.measured_cycles == 16
-    assert f.dfb_wait_block_cycles == 4
-    assert f.dfb_reserve_block_cycles == 4
-    assert f.copy_duration_cycles == 3
-    assert f.wait_tiles == 2
-    assert f.reserve_tiles == 3
-    assert f.copy_tiles == 4
-    assert f.local_l1_tiles == 1
-    assert f.remote_l1_tiles == 2
-    assert f.dram_tiles == 1
-
-
-def test_extract_features_closes_open_kernel_at_trace_end() -> None:
-    events = [
-        TraceEvent(10, "kernel_start", "node0-compute", {}),
-        TraceEvent(20, "dfb_push", "node0-compute", {}),
-    ]
-
-    features = extract_kernel_features(events)
-    f = features["node0-compute"]
-
-    assert f.measured_cycles == 10
-    assert f.blocked_cycles == 0
-    assert f.active_cycles == 10
-
-
-def test_extract_features_ignores_unpaired_phase_begin_events() -> None:
-    events = [
-        TraceEvent(0, "kernel_start", "node0-read", {}),
-        TraceEvent(1, "dfb_wait_begin", "node0-read", {}),
-        TraceEvent(2, "dfb_reserve_begin", "node0-read", {}),
-        TraceEvent(3, "copy_start", "node0-read", {}),
-        TraceEvent(4, "kernel_end", "node0-read", {}),
-    ]
-
-    features = extract_kernel_features(events)
-    f = features["node0-read"]
-
-    assert f.wait_count == 1
-    assert f.reserve_count == 1
-    assert f.copy_calls == 0
-    assert f.dfb_wait_block_cycles == 0
-    assert f.dfb_reserve_block_cycles == 0
-    assert f.copy_duration_cycles == 0
-
-
-# ---------------------------------------------------------------------------
-# v1.0 analytical peak model (Step 2: movement path)
-# ---------------------------------------------------------------------------
 
 
 def _hw() -> HardwareProfile:
@@ -333,6 +49,11 @@ def _hw() -> HardwareProfile:
         clock_ghz=1.0,
         bytes_per_tile=2.0,
     )
+
+
+# ---------------------------------------------------------------------------
+# Movement path
+# ---------------------------------------------------------------------------
 
 
 def test_extract_kernel_work_emits_movement_op_per_locality() -> None:
@@ -382,12 +103,8 @@ def test_kernel_cycles_is_max_of_compute_and_movement_paths() -> None:
     kw = KernelWork(
         kernel="node0-compute",
         ops=[
-            OpWork(
-                kind="compute", op_type="matmul", dtype="bf16", tiles=10
-            ),  # 10/2 = 5
-            OpWork(
-                kind="movement", op_type="copy", tiles=4, locality="dram"
-            ),  # 8/2 = 4
+            OpWork(kind="compute", op_type="matmul", dtype="bf16", tiles=10),  # 5
+            OpWork(kind="movement", op_type="copy", tiles=4, locality="dram"),  # 4
         ],
     )
     # max(compute_path=5, movement_path=4) = 5
@@ -402,12 +119,10 @@ def test_zero_work_zero_cycles() -> None:
 
 
 # ---------------------------------------------------------------------------
-# v1.0 invariants / regression fixtures (Step 3)
+# Invariants / regression fixtures
 #
-# These assert structural PROPERTIES that must hold for any valid input and
-# survive later steps (e.g. Step 5 replacing the program_cycles combiner). They
-# test bounds and guarantees, not a placeholder's exact arithmetic, so they do
-# not need rewriting when the combiner changes.
+# These assert structural PROPERTIES that hold for any valid input (bounds and
+# guarantees, not exact placeholder arithmetic).
 # ---------------------------------------------------------------------------
 
 
@@ -436,9 +151,8 @@ def test_compute_cost_monotonic_in_tiles() -> None:
 
 
 def test_kernel_cycles_never_double_counts() -> None:
-    # The headline of the restructure: overlap (max), never additive (sum).
-    # max(compute, movement) <= kernel <= compute + movement, and strictly less
-    # than the additive sum when both paths are non-zero.
+    # Overlap (max), never additive (sum): max(c, m) <= kernel <= c + m, and
+    # strictly less than the additive sum when both paths are non-zero.
     hw = _hw()
     kw = _mixed_kernel()
     compute_path, movement_path = 5.0, 4.0
@@ -498,9 +212,8 @@ def test_program_cycles_within_node_is_max_of_kernels() -> None:
 
 
 def test_program_cycles_bounded_by_max_and_sum_of_kernels() -> None:
-    # Bound holds for the current per-node-max placeholder AND the future
-    # dependency-DAG critical path (Step 5): a program can be no faster than its
-    # slowest kernel and no slower than running every kernel serially.
+    # A program is no faster than its slowest kernel and no slower than running
+    # every kernel serially.
     hw = _hw()
     kernels = [
         KernelWork(
@@ -520,8 +233,7 @@ def test_program_cycles_bounded_by_max_and_sum_of_kernels() -> None:
 
 def test_hand_derived_simple_kernel_value() -> None:
     # Hand-derived golden: a read kernel moving 4 dram tiles.
-    # bytes = 4 * 2 = 8; bw(dram) = 2 -> 4.0 cycles. Locks kernel-level output
-    # (stable across the Step 5 program-combiner change).
+    # bytes = 4 * 2 = 8; bw(dram) = 2 -> 4.0 cycles.
     hw = _hw()
     kw = KernelWork(
         kernel="node0-read",
@@ -531,10 +243,7 @@ def test_hand_derived_simple_kernel_value() -> None:
 
 
 # ---------------------------------------------------------------------------
-# v1.0 compute path (Step 4) — consumer built against synthetic compute_op
-# events (the agreed sim instrumentation contract). These tests are final: when
-# the simulator starts emitting compute_op events, the same parser handles them
-# unchanged.
+# Compute path (consumer built against synthetic compute_op events)
 # ---------------------------------------------------------------------------
 
 
@@ -611,7 +320,7 @@ def test_compute_op_missing_dtype_falls_back_to_default_rate() -> None:
 
 
 # ---------------------------------------------------------------------------
-# v1.0 report (Step 6)
+# rate_for + report rendering
 # ---------------------------------------------------------------------------
 
 
@@ -644,7 +353,7 @@ def test_kernel_paths_splits_compute_and_movement() -> None:
     assert kernel_paths(kw, hw) == (5.0, 4.0)
 
 
-def test_peak_report_shows_decomposition_and_program_total(capsys) -> None:
+def test_detailed_report_shows_decomposition_and_program_total(capsys) -> None:
     hw = _hw()
     kernels = [
         KernelWork(
@@ -657,7 +366,7 @@ def test_peak_report_shows_decomposition_and_program_total(capsys) -> None:
         ),
     ]
 
-    print_peak_report(build_peak_result(kernels, hw))
+    print_detailed(build_estimate(kernels, hw))
     out = capsys.readouterr().out
 
     assert "ideal-peak model" in out
@@ -666,7 +375,7 @@ def test_peak_report_shows_decomposition_and_program_total(capsys) -> None:
     assert "Program cycles" in out
 
 
-def test_peak_report_notes_empty_compute_path(capsys) -> None:
+def test_detailed_report_notes_empty_compute_path(capsys) -> None:
     hw = _hw()
     kernels = [
         KernelWork(
@@ -675,13 +384,13 @@ def test_peak_report_notes_empty_compute_path(capsys) -> None:
         ),
     ]
 
-    print_peak_report(build_peak_result(kernels, hw))
+    print_detailed(build_estimate(kernels, hw))
     out = capsys.readouterr().out
 
     assert "compute path is 0" in out
 
 
-def test_peak_summary_rolls_up_per_node_and_reports_utilization(capsys) -> None:
+def test_summary_rolls_up_per_node_and_reports_utilization(capsys) -> None:
     hw = _hw()
     kernels = [
         KernelWork(
@@ -696,7 +405,7 @@ def test_peak_summary_rolls_up_per_node_and_reports_utilization(capsys) -> None:
         KernelWork(kernel="node1-compute", ops=[]),
     ]
 
-    print_peak_summary(build_peak_result(kernels, hw))
+    print_summary(build_estimate(kernels, hw))
     out = capsys.readouterr().out
 
     assert "Node" in out
@@ -706,7 +415,7 @@ def test_peak_summary_rolls_up_per_node_and_reports_utilization(capsys) -> None:
     assert "node1" not in out  # idle node hidden by default
 
 
-def test_peak_json_write_then_load_round_trip(tmp_path) -> None:
+def test_json_write_then_load_round_trip(tmp_path) -> None:
     hw = _hw()
     kernels = [
         KernelWork(
@@ -714,33 +423,33 @@ def test_peak_json_write_then_load_round_trip(tmp_path) -> None:
             ops=[OpWork(kind="movement", op_type="copy", tiles=4, locality="dram")],
         ),
     ]
-    result = build_peak_result(kernels, hw)
+    estimate = build_estimate(kernels, hw)
 
     p = tmp_path / "report.json"
-    write_peak_json_report(p, result)
-    loaded = load_peak_result(p)
+    write_json(p, estimate)
+    loaded = load_estimate(p)
 
-    assert loaded.profile_name == result.profile_name
-    assert loaded.program_cycles == result.program_cycles
-    assert [k.kernel for k in loaded.kernels] == [k.kernel for k in result.kernels]
+    assert loaded.profile_name == estimate.profile_name
+    assert loaded.program_cycles == estimate.program_cycles
+    assert [k.kernel for k in loaded.kernels] == [k.kernel for k in estimate.kernels]
     assert loaded.kernels[0].movement_cycles == 4.0
 
 
-def test_load_peak_result_rejects_non_report(tmp_path) -> None:
+def test_load_estimate_rejects_non_report(tmp_path) -> None:
     p = tmp_path / "other.json"
     p.write_text('{"foo": 1}', encoding="utf-8")
     with pytest.raises(ValueError):
-        load_peak_result(p)
+        load_estimate(p)
 
 
-def test_load_peak_result_rejects_jsonl_trace(tmp_path) -> None:
+def test_load_estimate_rejects_jsonl_trace(tmp_path) -> None:
     # A raw trace is JSON Lines (multiple objects), not a single report object.
     p = tmp_path / "trace.jsonl"
     p.write_text(
         '{"event": "kernel_start"}\n{"event": "kernel_end"}\n', encoding="utf-8"
     )
     with pytest.raises(ValueError):
-        load_peak_result(p)
+        load_estimate(p)
 
 
 # ---------------------------------------------------------------------------

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: (c) 2026 Tenstorrent AI ULC
 #
 # SPDX-License-Identifier: Apache-2.0
-"""CLI wiring for cycle estimation."""
+"""CLI wiring for the cycle estimator."""
 
 from __future__ import annotations
 
@@ -10,35 +10,14 @@ import sys
 from pathlib import Path
 
 from .hardware_profile import DEFAULT, resolve_profile
-from .model import (
-    build_peak_result,
-    estimate_kernel_cycles,
-    group_kernel_estimates,
-)
-from .parse import extract_kernel_features, extract_kernel_work, parse_trace
-from .report import (
-    load_peak_result,
-    print_peak_report,
-    print_peak_summary,
-    print_report,
-    write_json_report,
-    write_peak_json_report,
-)
-from .types import EstimatorConfig, KernelEstimate, KernelWork, PeakResult
+from .model import build_estimate
+from .parse import extract_kernel_work, parse_trace
+from .report import load_estimate, print_detailed, print_summary, write_json
+from .types import CycleEstimate, KernelWork
 
 
-def build_estimation_pipeline(
-    trace_path: Path,
-    config: EstimatorConfig,
-    include_zero_kernels: bool = False,
-) -> list[KernelEstimate]:
-    events = parse_trace(trace_path)
-    features = extract_kernel_features(events)
-    return estimate_kernel_cycles(features, config, include_zero_kernels)
-
-
-def build_peak_pipeline(trace_path: Path) -> list[KernelWork]:
-    """v1.0 analytical peak pipeline: trace -> per-kernel work records."""
+def build_pipeline(trace_path: Path) -> list[KernelWork]:
+    """Trace -> per-kernel work records."""
     events = parse_trace(trace_path)
     return list(extract_kernel_work(events).values())
 
@@ -47,13 +26,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         prog="tt-lang-sim-cycles",
         description=(
-            "Estimate kernel cycles from a tt-lang simulator trace using a "
-            "higher-level roofline-style model."
-        ),
-        epilog=(
-            "Advanced model-tuning flags (roofline peaks, per-event costs, "
-            "blocking scales) are hidden from this help; see "
-            "docs/development/CycleEstimator.md."
+            "Estimate hardware cycles from a tt-lang simulator trace using an "
+            "analytical ideal-peak model (work-counts / hardware-profile rates)."
         ),
     )
     parser.add_argument(
@@ -67,28 +41,19 @@ def main() -> None:
         "--view-report",
         metavar="REPORT.json",
         default=None,
-        help="Render a previously saved peak JSON report (no trace needed)",
+        help="Render a previously saved JSON report (no trace needed)",
     )
     parser.add_argument(
         "--detailed",
         action="store_true",
-        help="Peak model: show the full per-kernel table instead of the per-node summary",
-    )
-    parser.add_argument(
-        "--model",
-        choices=("phase", "peak"),
-        default="phase",
-        help=(
-            "Estimation model: 'phase' (v0.1, default) or 'peak' "
-            "(v1.0 analytical ideal-peak, hardware-cycle oriented)"
-        ),
+        help="Show the full per-kernel table instead of the per-node summary",
     )
     parser.add_argument(
         "--hw-profile",
         default=DEFAULT.name,
         help=(
-            "Hardware profile for the peak model: a built-in name or a path to a "
-            ".json profile file (default: %(default)s)"
+            "Hardware profile: a built-in name or a path to a .json profile file "
+            "(default: %(default)s)"
         ),
     )
     parser.add_argument(
@@ -100,115 +65,24 @@ def main() -> None:
     parser.add_argument(
         "--include-zero-kernels",
         action="store_true",
-        help="Include kernels with both measured and estimated cycles equal to zero",
-    )
-
-    # Advanced model-tuning knobs. Hidden from --help (help=SUPPRESS) so the
-    # common path matches the sibling tt-lang-sim-stats tool; still accepted on
-    # the command line and documented in docs/development/CycleEstimator.md.
-    tuning = parser.add_argument_group("advanced tuning")
-    tuning.add_argument(
-        "--flops-per-tile",
-        type=float,
-        default=EstimatorConfig.flops_per_tile,
-        help=argparse.SUPPRESS,
-    )
-    tuning.add_argument(
-        "--bytes-per-tile",
-        type=float,
-        default=EstimatorConfig.bytes_per_tile,
-        help=argparse.SUPPRESS,
-    )
-    tuning.add_argument(
-        "--peak-flops-per-cycle",
-        type=float,
-        default=EstimatorConfig.peak_flops_per_cycle,
-        help=argparse.SUPPRESS,
-    )
-    tuning.add_argument(
-        "--memory-bytes-per-cycle",
-        type=float,
-        default=EstimatorConfig.memory_bytes_per_cycle,
-        help=argparse.SUPPRESS,
-    )
-    tuning.add_argument(
-        "--wait-event-cycles",
-        type=float,
-        default=EstimatorConfig.wait_event_cycles,
-        help=argparse.SUPPRESS,
-    )
-    tuning.add_argument(
-        "--reserve-event-cycles",
-        type=float,
-        default=EstimatorConfig.reserve_event_cycles,
-        help=argparse.SUPPRESS,
-    )
-    tuning.add_argument(
-        "--sync-event-cycles",
-        type=float,
-        default=EstimatorConfig.sync_event_cycles,
-        help=argparse.SUPPRESS,
-    )
-    tuning.add_argument(
-        "--copy-call-cycles",
-        type=float,
-        default=EstimatorConfig.copy_call_cycles,
-        help=argparse.SUPPRESS,
-    )
-    tuning.add_argument(
-        "--blocked-cycle-weight",
-        type=float,
-        default=EstimatorConfig.blocked_cycle_weight,
-        help=argparse.SUPPRESS,
-    )
-    tuning.add_argument(
-        "--kernel-launch-cycles",
-        type=float,
-        default=EstimatorConfig.kernel_launch_cycles,
-        help=argparse.SUPPRESS,
-    )
-    tuning.add_argument(
-        "--dfb-wait-block-scale",
-        type=float,
-        default=EstimatorConfig.dfb_wait_block_scale,
-        help=argparse.SUPPRESS,
-    )
-    tuning.add_argument(
-        "--dfb-reserve-block-scale",
-        type=float,
-        default=EstimatorConfig.dfb_reserve_block_scale,
-        help=argparse.SUPPRESS,
-    )
-    tuning.add_argument(
-        "--copy-duration-scale",
-        type=float,
-        default=EstimatorConfig.copy_duration_scale,
-        help=argparse.SUPPRESS,
-    )
-    tuning.add_argument(
-        "--mismatch-threshold-pct",
-        type=float,
-        default=EstimatorConfig.mismatch_threshold_pct,
-        help=argparse.SUPPRESS,
+        help="Summary: also list idle (zero-cycle) nodes",
     )
     args = parser.parse_args()
 
-    def _render_peak(result: PeakResult) -> None:
+    def _render(estimate: CycleEstimate) -> None:
         if args.detailed:
-            # Detailed = complete: every kernel, including zero rows.
-            print_peak_report(result)
+            print_detailed(estimate)
         else:
-            # Summary = active nodes; --include-zero-kernels also lists idle ones.
-            print_peak_summary(result, include_zero=args.include_zero_kernels)
+            print_summary(estimate, include_zero=args.include_zero_kernels)
 
-    # View a previously saved peak report (no trace, no recompute).
+    # View a previously saved report (no trace, no recompute).
     if args.view_report is not None:
         try:
-            result = load_peak_result(args.view_report)
+            estimate = load_estimate(args.view_report)
         except (FileNotFoundError, ValueError) as exc:
             print(f"Error: {exc}", file=sys.stderr)
             sys.exit(1)
-        _render_peak(result)
+        _render(estimate)
         return
 
     if args.trace is None:
@@ -219,47 +93,16 @@ def main() -> None:
         print(f"Error: trace file not found: {trace_path}", file=sys.stderr)
         sys.exit(1)
 
-    if args.model == "peak":
-        try:
-            hw = resolve_profile(args.hw_profile)
-        except (KeyError, FileNotFoundError, ValueError) as exc:
-            print(f"Error: {exc}", file=sys.stderr)
-            sys.exit(1)
-        result = build_peak_result(build_peak_pipeline(trace_path), hw)
-        _render_peak(result)
-        if args.json_out is not None:
-            out_path = args.json_out.resolve()
-            out_path.parent.mkdir(parents=True, exist_ok=True)
-            write_peak_json_report(out_path, result)
-            print(f"\nWrote JSON report: {out_path}")
-        return
+    try:
+        hw = resolve_profile(args.hw_profile)
+    except (KeyError, FileNotFoundError, ValueError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
 
-    config = EstimatorConfig(
-        flops_per_tile=args.flops_per_tile,
-        bytes_per_tile=args.bytes_per_tile,
-        peak_flops_per_cycle=args.peak_flops_per_cycle,
-        memory_bytes_per_cycle=args.memory_bytes_per_cycle,
-        wait_event_cycles=args.wait_event_cycles,
-        reserve_event_cycles=args.reserve_event_cycles,
-        sync_event_cycles=args.sync_event_cycles,
-        copy_call_cycles=args.copy_call_cycles,
-        blocked_cycle_weight=args.blocked_cycle_weight,
-        kernel_launch_cycles=args.kernel_launch_cycles,
-        dfb_wait_block_scale=args.dfb_wait_block_scale,
-        dfb_reserve_block_scale=args.dfb_reserve_block_scale,
-        copy_duration_scale=args.copy_duration_scale,
-        mismatch_threshold_pct=args.mismatch_threshold_pct,
-    )
-    rows = build_estimation_pipeline(
-        trace_path,
-        config,
-        include_zero_kernels=args.include_zero_kernels,
-    )
-    print_report(rows, config.mismatch_threshold_pct)
-
+    estimate = build_estimate(build_pipeline(trace_path), hw)
+    _render(estimate)
     if args.json_out is not None:
         out_path = args.json_out.resolve()
         out_path.parent.mkdir(parents=True, exist_ok=True)
-        groups = group_kernel_estimates(rows)
-        write_json_report(out_path, rows, groups, config)
+        write_json(out_path, estimate)
         print(f"\nWrote JSON report: {out_path}")

@@ -1,43 +1,40 @@
+# SPDX-FileCopyrightText: (c) 2026 Tenstorrent AI ULC
+#
+# SPDX-License-Identifier: Apache-2.0
 """Cycle estimation package for simulator traces."""
 
-from .cli import build_estimation_pipeline, main
-from .model import (
-    estimate_kernel_cycles,
-    group_kernel_estimates,
-    mismatch_reason,
-)
-from .parse import extract_kernel_features, parse_trace
+from .cli import build_pipeline, main
+from .model import build_estimate
+from .parse import extract_kernel_work, parse_trace
 from .report import (
-    ablation_metrics,
-    feature_provenance,
-    print_report,
-    role_calibration_suggestions,
-    write_json_report,
+    load_estimate,
+    print_detailed,
+    print_summary,
+    write_json,
 )
 from .types import (
-    EstimatorConfig,
+    CycleEstimate,
+    HardwareProfile,
     KernelEstimate,
-    KernelFeatures,
-    KernelGroupEstimate,
+    KernelWork,
+    OpWork,
     TraceEvent,
 )
 
 __all__ = [
     "TraceEvent",
-    "KernelFeatures",
-    "EstimatorConfig",
+    "HardwareProfile",
+    "OpWork",
+    "KernelWork",
     "KernelEstimate",
-    "KernelGroupEstimate",
+    "CycleEstimate",
     "parse_trace",
-    "extract_kernel_features",
-    "mismatch_reason",
-    "estimate_kernel_cycles",
-    "group_kernel_estimates",
-    "ablation_metrics",
-    "feature_provenance",
-    "role_calibration_suggestions",
-    "print_report",
-    "write_json_report",
-    "build_estimation_pipeline",
+    "extract_kernel_work",
+    "build_estimate",
+    "build_pipeline",
+    "print_summary",
+    "print_detailed",
+    "write_json",
+    "load_estimate",
     "main",
 ]

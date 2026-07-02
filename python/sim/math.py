@@ -174,6 +174,9 @@ def _apply_binary_op(
 
     result_block = Block.from_list(result_list, shape=a_shape)  # type: ignore[attr-defined]
     track_source_blocks(result_block, a, b)
+    # [cycle-estimator] generic op_type: no op name is threaded here (max/min/compare).
+    if TRACE.enabled:
+        trace("compute_op", op_type="eltwise_binary", tiles=len(a))
     return result_block
 
 

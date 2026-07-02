@@ -1,6 +1,6 @@
 # Cycle Estimator — v1.0 Restructure (Development Plan)
 
-**Status:** v0.1 is being replaced, not extended. v0.1 predicts a *logical-time* signal, not hardware cycles; no weight tuning fixes that. v1.0 re-bases the estimator on an analytical peak-performance model. This document is the development reference and tracking checklist for the v0.1 → v1.0 restructure. The self-check checklist is at the end.
+**Status:** the v0.1 additive / logical-tick model has been **removed**; the estimator is now the analytical ideal-peak model (work-counts ÷ hardware-profile rates). This document is the design reference + checklist; §1–2 record *why* v0.1 was replaced. The self-check checklist is at the end.
 
 For the current (v0.1) source layout see `python/sim_stats/cycle_tools/`.
 
@@ -128,20 +128,18 @@ chokepoint. Covered so far:
 | `dfb.matmul` | matmul | `matmul` (tiles = M·K·N) |
 | `math._create_unary_op_wrapper` | auto-gen unary (exp, rsqrt, sqrt, relu, sign, …) | op name |
 | `math._apply_unary_with_params` | relu_max, clamp, elu, leaky_relu, celu, prelu, softplus, hardtanh, round, threshold | `eltwise_unary` (generic — no name threaded) |
+| `math._apply_binary_op` | `max`, `min`, `gt`, `lt`, `eq`, `ne` | `eltwise_binary` (generic — no name threaded) |
 | `math._reduce_impl` | reduce_sum, reduce_max | `reduce_sum` / `reduce_max` |
 
 **Gaps (not yet emitting `compute_op`):**
 
 | site | ops | note |
 |---|---|---|
-| `math._apply_binary_op` | `max`, `min`, `gt`, `lt`, `eq`, `ne` | separate math binary/compare path from `Block._binary_op` |
 | `block.broadcast` | broadcast | fan-out/layout — decide whether it counts as compute |
 | `block.transpose` | transpose | layout op — decide whether it counts as compute |
 | tile-level / other | — | anything not routed through the sites above |
 
-`_apply_unary_with_params` uses a generic `op_type`; thread a name from its callers
-if per-op compute rates are needed. Broadcast/transpose are layout ops — instrument
-them only if the compute model should charge for them.
+`_apply_unary_with_params` / `_apply_binary_op` use generic `op_type`s; thread a name from their callers if per-op compute rates are needed. Broadcast/transpose are layout ops — instrument them only if the compute model should charge for them.
 
 ---
 
@@ -154,29 +152,18 @@ them only if the compute model should charge for them.
 
 ### Removal readiness & order
 
-**Prerequisites (met):** peak produces complete compute + movement estimates, is
-reachable (`--model peak`), and has summary / detailed / JSON / view-report. The
-sim `compute_op` instrumentation exists in this branch, so both movement and
-compute flow end-to-end.
+**Prerequisites (met):** peak produces complete compute + movement estimates, is reachable (`--model peak`), and has summary / detailed / JSON / view-report. The sim `compute_op` instrumentation exists in this branch, so both movement and compute flow end-to-end.
 
 **Do atomically (or imports break):**
-- remove the v0.1 model (`estimate_kernel_cycles`, `EstimatorConfig`,
-  `mismatch_reason`) and report helpers (`ablation_metrics`,
-  `role_calibration_suggestions`);
-- slim `extract_kernel_features` / `KernelFeatures` down to the `measured_cycles`
-  / `blocked_cycles` diagnostics, folded onto `KernelWork`;
-- update `cycle_estimator.py` + `cycle_tools/__init__.py` re-exports in the same
-  change (they still name the removed symbols);
+- remove the v0.1 model (`estimate_kernel_cycles`, `EstimatorConfig`, `mismatch_reason`) and report helpers (`ablation_metrics`, `role_calibration_suggestions`);
+- slim `extract_kernel_features` / `KernelFeatures` down to the `measured_cycles` / `blocked_cycles` diagnostics, folded onto `KernelWork`;
+- update `cycle_estimator.py` + `cycle_tools/__init__.py` re-exports in the same change (they still name the removed symbols);
 - flip the default `--model` to peak; update tests.
 
 **Accept before making peak the default:**
 - compute rates are provisional placeholders (not hardware-validated);
-- coverage gaps mean some ops emit no `compute_op` — `max`/`min`/compare (via
-  `math._apply_binary_op`), `block.broadcast`/`transpose` — so those show 0
-  compute. Closing the `_apply_binary_op` gap first is cheap and avoids a silent
-  under-count;
-- keep the sim instrumentation and this removal on the same merge, so the peak
-  default never ships without its producer.
+- coverage gaps mean some ops emit no `compute_op` — `max`/`min`/compare (via `math._apply_binary_op`), `block.broadcast`/`transpose` — so those show 0 compute. Closing the `_apply_binary_op` gap first is cheap and avoids a silent under-count;
+- keep the sim instrumentation and this removal on the same merge, so the peak default never ships without its producer.
 
 ---
 
@@ -185,8 +172,7 @@ compute flow end-to-end.
 Under ideal-peak there are **no hardware labels**, so v1.0 cannot be scored by accuracy. It is validated for correctness, behavior, and sensitivity; accuracy is deferred until profiling data exists.
 
 - **Correctness (regression fixtures):** invariants — `2× tiles → 2× compute cycles`, `estimate ≥ roofline lower bound`, `max(compute, movement) ≤ estimate ≤ compute + movement` (never additive), zero work → zero cycles, determinism. Plus hand-derived cross-checks on simple kernels. (Synthetic identifiability does not apply under ideal-peak — there is no fitting step.)
-- **Behavior:** per-kernel decomposition (compute vs movement, dominant term, bound class); coverage across a work-count matrix (compute-bound / memory-bound / mixed / multi-core / pipe),
-  small → large.
+- **Behavior:** per-kernel decomposition (compute vs movement, dominant term, bound class); coverage across a work-count matrix (compute-bound / memory-bound / mixed / multi-core / pipe), small → large.
 - **Sensitivity:** sweep the hardware spec and confirm estimates/bound-class shift sensibly.
 - **Deferred:** validate against profiled device cycles (tt-metal `ReadDeviceProfilerResults`, PROFILER build); the residual vs ideal-peak is the utilization factor for later non-ideal work.
 
@@ -208,28 +194,28 @@ Under ideal-peak there are **no hardware labels**, so v1.0 cannot be scored by a
 - [x] Emit at main op sites — binary (`Block._binary_op`), matmul, unary, reduce (`op_type` + `tiles`)
 - [x] New event under its own `compute` trace category (filterable)
 - [ ] `dtype` not yet emitted (falls back to `compute_rate_default`)
-- [ ] Coverage gaps: `math._apply_binary_op` (max/min/compare), `block.broadcast`/`transpose`, `_apply_unary_with_params` generic label — see coverage table above
+- [ ] Coverage gaps: `block.broadcast`/`transpose`; `_apply_unary_with_params` / `_apply_binary_op` use generic labels — see coverage table above
 - [ ] Review + merge into the shared simulator module
 
 ### Data model (`cycle_tools/types.py`)
 - [x] Add `HardwareProfile` (compute rates by op/dtype, NoC bw by locality, latency, clock, engines)
 - [x] Add per-op work-record type `OpWork` + `KernelWork` container (kind, op_type, dtype, tiles, locality)
-- [ ] Remove `EstimatorConfig` tuning knobs (scales, per-event costs, flops/bytes, blocked weight)
-- [ ] Keep `measured_cycles` / tick fields only as diagnostics
+- [x] Remove v0.1 types (`EstimatorConfig`, old `KernelEstimate`, `KernelGroupEstimate`, `KernelFeatures`); rename `PeakKernel`/`PeakResult` → `KernelEstimate`/`CycleEstimate`
+- [x] Drop the logical-tick diagnostics (`measured_cycles`/`blocked_cycles`) — unused by the peak model
 
 ### Parsing (`cycle_tools/parse.py`)
 - [x] Movement work records from `copy_end` localities (`extract_kernel_work`, alongside v0.1)
 - [x] Handle traces without compute-op events gracefully (movement-only, empty compute path)
 - [x] Consume `compute_op` events → compute work records (consumer done + tested against the contract; real traces await sim emission)
 - [ ] Reconstruct dependency/overlap structure (`kernel_block.on`, dfb push/pop, pipe send/recv) — deferred; only needed for the latency regime
-- [ ] Demote tick-duration extraction to diagnostics
+- [x] Remove `extract_kernel_features` (v0.1); tick-duration extraction dropped
 
 ### Model & combiner (`cycle_tools/model.py`, `cycle_tools/schedule.py`)
 - [x] Per-op cost: compute = `tiles / rate`; movement = `latency + bytes / bw` (`schedule.op_cycles`)
 - [x] Kernel cost: `max(compute_path, movement_path)` (`schedule.kernel_cycles`)
 - [x] Program cost: throughput-bound `max` — parallel cores across nodes, concurrent RISCs within a node (`schedule.program_cycles`). DAG latency regime deferred.
-- [ ] Remove additive sum, roofline-on-top, stall/sync/blocked terms
-- [ ] Remove `mismatch_reason` escalation logic
+- [x] Remove additive sum, roofline-on-top, stall/sync/blocked terms (whole v0.1 `estimate_kernel_cycles`)
+- [x] Remove `mismatch_reason` escalation; rename `build_peak_result` → `build_estimate`
 
 ### Hardware profile (`cycle_tools/hardware_profile.py`)
 - [x] Add `HardwareProfile` named registry (`get_profile`, scaffold, provisional rates)
@@ -238,20 +224,17 @@ Under ideal-peak there are **no hardware labels**, so v1.0 cannot be scored by a
 - [x] Custom-profile file loader — `load_profile_json` / `resolve_profile`; `--hw-profile <name|path.json>`
 
 ### Reporting (`cycle_tools/report.py`)
-- [x] `PeakResult` canonical intermediate — render + JSON are pure functions of it
+- [x] `CycleEstimate` canonical intermediate — render + JSON are pure functions of it
 - [x] Per-node **summary** (default, active nodes + utilization; `--include-zero-kernels` lists idle) + complete per-kernel **detailed** view (`--detailed`, all rows)
-- [x] Peak JSON export (`--json-out`) — full, self-describing (`tool`/`schema_version`/profile)
+- [x] JSON export (`--json-out`) — full, self-describing (`tool`/`schema_version`/profile)
 - [x] Reload + re-render a saved report (`--view-report`), with report-vs-trace validation
+- [x] Remove `ablation_metrics`, `role_calibration_suggestions`, `feature_provenance`, `print_report`, `write_json_report` (v0.1); renderers renamed `print_summary`/`print_detailed`/`write_json`/`load_estimate`
 - [ ] Per-family + per-size reporting (never a single global number)
-- [ ] Remove `ablation_metrics` and `role_calibration_suggestions` (v0.1 removal)
-- [ ] Update `feature_provenance` to hardware-derived sources (v0.1 removal)
 
 ### CLI & entry (`cycle_tools/cli.py`, `cycle_estimator.py`, `cycle_tools/__init__.py`)
-- [x] Add `--model peak` + `--hw-profile` (v1.0 path reachable alongside v0.1)
-- [x] Add `--detailed`, `--json-out` (peak), `--view-report` (render saved report, no trace)
-- [ ] Drop v0.1 model-tuning flags + make peak the default (v0.1 removal)
-- [ ] Update `cycle_estimator.py` re-exports (drop removed symbols) (v0.1 removal)
-- [ ] Update `cycle_tools/__init__.py` exports (v0.1 removal)
+- [x] `--hw-profile`, `--detailed`, `--json-out`, `--view-report`, `--include-zero-kernels`
+- [x] Drop v0.1 tuning flags and `--model`; peak is the only model (default, no flag)
+- [x] Trim `cycle_estimator.py` + `cycle_tools/__init__.py` re-exports to the current API
 
 ### Validation
 - [x] Invariant tests (monotonicity, bounds, overlap=max-not-sum, determinism, zero-work) as regression fixtures
