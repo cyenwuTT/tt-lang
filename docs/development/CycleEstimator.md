@@ -154,20 +154,20 @@ Bottleneck     : 32 nodes @ 4934.36 (memory-bound)
 
 ```
 tt-lang-sim-cycles trace.jsonl
-    [--hw-profile NAME|FILE.json]   # built-in profile name or custom JSON
-    [--detailed]                    # full per-kernel table
-    [--json-out OUT.json]           # write a self-describing report
-    [--view-report REPORT.json]     # reload + render a saved report
+    [-d | --detailed]               # full per-kernel table
+    [-p | --hw-profile NAME|FILE.json]     # built-in profile name or custom JSON
+    [-o | --json-out OUT.json]      # write a self-describing report
+    [-r | --view-report REPORT.json]       # reload + render a saved report
     [--include-zero-kernels]        # summary: also list idle nodes
 ```
 
 **Inline** — run and estimate in one step:
 
 ```
-tt-lang-sim prog.py --cycles [--trace trace.jsonl]
+tt-lang-sim prog.py --cycles [REPORT.json] [--hw-profile NAME|FILE.json] [--trace trace.jsonl]
 ```
 
-Runs the program, then prints the summary from the same in-memory trace (no file round-trip). Combine with `--trace` to also save the trace. `--cycles` uses the default hardware profile; drop to `tt-lang-sim-cycles` for profile and report options.
+Runs the program, then prints the estimate **summary** from the same in-memory trace (no file round-trip). Give a path after `--cycles` to also write the JSON report there (like `--trace`), and `--hw-profile` to target a specific part. For the per-kernel **detailed** view or to re-render a saved report, use `tt-lang-sim-cycles`.
 
 ---
 
@@ -216,7 +216,7 @@ Accuracy against profiled device cycles (`tt-metal` `ReadDeviceProfilerResults`,
 ## Limitations & Deferred Work
 
 - **Compute rates are provisional** — movement rates are seeded from tt-metal NoC data; compute rates await arch/ISA references.
-- **`dtype` is not emitted**, so compute rates are keyed by `op_type` alone.
+- **dtype-blind** — `dtype` is not emitted, so compute rates key on `op_type` alone, and movement uses a fixed `bytes_per_tile` (bf16) regardless of tensor dtype.
 - **`broadcast` / `transpose` are not charged** as compute.
 - **Latency regime** (fill/drain, cross-node serialization) is outside the current throughput-bound model; it needs the dependency DAG.
 - **Behavioral-coverage and sensitivity sweeps**, and per-family / per-size reporting, are not yet built out.

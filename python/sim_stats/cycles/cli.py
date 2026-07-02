@@ -38,17 +38,20 @@ def main() -> None:
         help="JSON Lines trace file produced by tt-lang-sim --trace",
     )
     parser.add_argument(
+        "-r",
         "--view-report",
         metavar="REPORT.json",
         default=None,
         help="Render a previously saved JSON report (no trace needed)",
     )
     parser.add_argument(
+        "-d",
         "--detailed",
         action="store_true",
         help="Show the full per-kernel table instead of the per-node summary",
     )
     parser.add_argument(
+        "-p",
         "--hw-profile",
         default=DEFAULT.name,
         help=(
@@ -57,6 +60,7 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "-o",
         "--json-out",
         type=Path,
         default=None,
