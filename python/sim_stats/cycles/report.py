@@ -15,15 +15,30 @@ from ..utils import node_sort_key
 
 _TOOL = "tt-lang-sim-cycles"
 _SCHEMA_VERSION = 1
-_WIDTH = 78
-_FRAME = "=" * _WIDTH  # report frame (top / bottom only)
-_SECT = "-" * _WIDTH  # section break
-_HDR = "." * _WIDTH  # column-header underline
+_MIN_WIDTH = 78
+_NUM_W = 12
+_MIN_LABEL = 28
+# label + 3 numeric cols (each led by a space) + two-space gap + widest bound.
+_ROW_TAIL = 3 * (_NUM_W + 1) + 2 + len("compute")
 
 
 def _short_bound(bound: str) -> str:
     """ "compute-bound" -> "compute"; the table header already says "Bound"."""
     return bound.split("-", 1)[0]
+
+
+def _label_width(labels: list[str], header: str) -> int:
+    """Column width that fits every label, the header, and a sensible minimum."""
+    return max([_MIN_LABEL, len(header), *(len(x) for x in labels)])
+
+
+def _row(
+    label: str, compute: float, movement: float, cycles: float, bound: str, label_w: int
+) -> str:
+    return (
+        f"{label:<{label_w}} {compute:>{_NUM_W}.2f} "
+        f"{movement:>{_NUM_W}.2f} {cycles:>{_NUM_W}.2f}  {bound}"
+    )
 
 
 def _per_node_rollup(
@@ -44,13 +59,16 @@ def _per_node_rollup(
     }
 
 
-def _header(estimate: CycleEstimate, unit: str) -> None:
-    print("\n" + _FRAME)
+def _header(estimate: CycleEstimate, unit: str, label_w: int, width: int) -> None:
+    print("\n" + "=" * width)
     print("Cycle Estimate — ideal-peak model")
     print(f"hw-profile: {estimate.profile_name}")
-    print(_FRAME)  # title block / tables separator
-    print(f"{unit:<28} {'Compute':>12} {'Movement':>12} {'Cycles':>12}  Bound")
-    print(_HDR)
+    print("=" * width)  # title block / tables separator
+    print(
+        f"{unit:<{label_w}} {'Compute':>{_NUM_W}} "
+        f"{'Movement':>{_NUM_W}} {'Cycles':>{_NUM_W}}  Bound"
+    )
+    print("." * width)
 
 
 def _bottleneck(active: dict[str, tuple[float, float, float, str]]) -> str:
@@ -69,6 +87,7 @@ def _bottleneck(active: dict[str, tuple[float, float, float, str]]) -> str:
 
 def _stats_footer(
     estimate: CycleEstimate,
+    width: int,
     rollup: dict[str, tuple[float, float, float, str]] | None = None,
 ) -> None:
     """Bound summary table + program/active/bottleneck stats. Shared by both views.
@@ -81,9 +100,9 @@ def _stats_footer(
     active = {n: v for n, v in rollup.items() if v[2] > 0.0}
 
     # Bound summary table (active nodes only) — its own section.
-    print(_SECT)
+    print("-" * width)
     print(f"{'Type':<10}{'Nodes':>8}{'Avg Cycles':>14}{'Max':>14}   Max node")
-    print(_HDR)
+    print("." * width)
     by_bound: dict[str, list[tuple[str, float]]] = {}
     for node, (_c, _m, cy, bound) in active.items():
         by_bound.setdefault(bound, []).append((node, cy))
@@ -103,13 +122,13 @@ def _stats_footer(
 
     # Summary — its own section.
     idle = estimate.total_nodes - estimate.active_nodes
-    print(_SECT)
+    print("-" * width)
     print(f"Program cycles : {estimate.program_cycles:.2f}")
     print(
         f"Active nodes   : {estimate.active_nodes} / {estimate.total_nodes}  ({idle} idle)"
     )
     print(f"Bottleneck     : {_bottleneck(active)}")
-    print(_FRAME)
+    print("=" * width)
     if sum(k.compute_cycles for k in estimate.kernels) == 0.0:
         print(
             "note: compute path is 0 — the trace has no compute_op events "
@@ -120,13 +139,21 @@ def _stats_footer(
 
 def print_detailed(estimate: CycleEstimate) -> None:
     """Detailed per-kernel view — complete, includes zero rows."""
-    _header(estimate, "Kernel")
+    label_w = _label_width([ke.kernel for ke in estimate.kernels], "Kernel")
+    width = max(_MIN_WIDTH, label_w + _ROW_TAIL)
+    _header(estimate, "Kernel", label_w, width)
     for ke in estimate.kernels:
         print(
-            f"{ke.kernel:<28} {ke.compute_cycles:>12.2f} {ke.movement_cycles:>12.2f} "
-            f"{ke.cycles:>12.2f}  {_short_bound(ke.bound)}"
+            _row(
+                ke.kernel,
+                ke.compute_cycles,
+                ke.movement_cycles,
+                ke.cycles,
+                _short_bound(ke.bound),
+                label_w,
+            )
         )
-    _stats_footer(estimate)
+    _stats_footer(estimate, width)
 
 
 def print_summary(estimate: CycleEstimate, include_zero: bool = False) -> None:
@@ -136,13 +163,15 @@ def print_summary(estimate: CycleEstimate, include_zero: bool = False) -> None:
     the program combiner.
     """
     rollup = _per_node_rollup(estimate)
-    _header(estimate, "Node")
+    label_w = _label_width(list(rollup), "Node")
+    width = max(_MIN_WIDTH, label_w + _ROW_TAIL)
+    _header(estimate, "Node", label_w, width)
     for node in sorted(rollup, key=node_sort_key):
         compute, movement, cyc, bound = rollup[node]
         if not include_zero and cyc == 0.0:
             continue
-        print(f"{node:<28} {compute:>12.2f} {movement:>12.2f} {cyc:>12.2f}  {bound}")
-    _stats_footer(estimate, rollup)
+        print(_row(node, compute, movement, cyc, bound, label_w))
+    _stats_footer(estimate, width, rollup)
 
 
 def write_json(path: Path, estimate: CycleEstimate) -> None:
