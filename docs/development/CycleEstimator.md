@@ -1,249 +1,223 @@
-# Cycle Estimator — v1.0 Restructure (Development Plan)
+# Cycle Estimator Design
 
-**Status:** the v0.1 additive / logical-tick model has been **removed**; the estimator is now the analytical ideal-peak model (work-counts ÷ hardware-profile rates). This document is the design reference + checklist; §1–2 record *why* v0.1 was replaced. The self-check checklist is at the end.
+## Overview
 
-For the current (v0.1) source layout see `python/sim_stats/cycle_tools/`.
+`tt-lang-sim-cycles` estimates hardware cycle counts for a tt-lang program from two inputs: a **hardware profile** (peak rates) and a **simulator trace** (`tt-lang-sim --trace`). It applies an **analytical ideal-peak model** — cycles are computed as work-counts ÷ hardware rates — and assumes the hardware runs at peak performance with no utilization derating.
 
----
+The estimator is a trace **consumer**: it reads the JSONL trace file and never imports the simulator. The trace file is the only contract between the two, which is why the estimator can run wherever a trace can be copied, independent of the sim.
 
-## 1. Background — what v0.1 does
-
-`tt-lang-sim-cycles` post-processes a `tt-lang-sim --trace` JSONL file and predicts each kernel's cycle count as an **additive sum of trace-derived terms**:
+Quick start:
 
 ```
-estimate = dfb_wait_dur + dfb_reserve_dur + copy_dur         (phase durations, from trace ticks)
-         + roofline_base                                     (max of compute / memory ceiling)
-         + stall + sync + copy_overhead + blocked + launch   (per-event overheads)
+tt-lang-sim prog.py --cycles       # run + estimate in one step
+tt-lang-sim-cycles trace.jsonl     # estimate from a saved trace
 ```
 
-Pipeline: `parse_trace → extract_kernel_features → estimate_kernel_cycles → group_kernel_estimates → report`.
-Constants (`flops_per_tile`, `peak_flops_per_cycle`, per-event costs, scale factors) live in `EstimatorConfig` and are hand-set placeholders.
+See [Command-Line Interface](#command-line-interface) for the full flag set.
 
 ---
 
-## 2. Why restructure instead of patch
+## The Model
 
-Three reasons — each a property of the design, not a tuning error:
+The trace supplies **work** (how many tiles each op computes or moves) and **structure** (which kernel runs on which node). It never supplies time — the simulator tick is a logical clock, not a duration (see [Design Rationale](#design-rationale--why-ideal-peak-not-fit-to-trace)).
 
-1. **The prediction target is logical ticks, not cycles.**
-  The simulator `tick` increments `+1` per scheduler activation that makes progress (`greenlet_scheduler.py`) — a fairness/ordering counter, not time. `measured_cycles = kernel_end.tick − kernel_start.tick` counts scheduler turns.
-  A "phase-only" estimate reconstructs it at ~0% WAPE, which only proves the model sums sub-intervals back into the whole — tautological, and meaningless as a hardware predictor.
+Cycles come entirely from work ÷ rate.
 
-2. **The combiner double-counts.**
-  Roofline is added *on top of* phase durations that already cover the same work; when work overlaps, the sum over-predicts (up to ~30× on small traces). The correct operator is `max`, not `+` — a structural change.
+**Per op.** Compute and movement each have a peak rate from the profile:
 
-3. **The constants have no hardware basis.**
-  `flops_per_tile=2048`, `peak_flops_per_cycle=4096`, etc. are placeholders; the supporting machinery (`role_calibration_suggestions`, `ablation_metrics`) exists only to fit/diagnose the logical-tick target.
+```
+compute op:   cyc = tiles / R_compute(op_type, dtype)
+movement op:  cyc = latency(locality) + (tiles × bytes_per_tile) / R_noc(locality)
+```
 
-Target, combiner, and constants are all wrong. That is a restructure.
+**Per kernel.** The compute engine and the data-movement engine run concurrently, so the kernel time is the larger of the two serial paths, not their sum:
 
----
+```
+T_kernel = max( Σ cyc_compute , Σ cyc_movement )
+```
 
-## 3. v1.0 Design — analytical peak model
+**Per program.** The model is throughput-bound, with two levels of overlap:
 
-**Goal:**
-  Estimate real hardware cycles from *(a) hardware spec profile* and *(b) simulator trace*, assuming the hardware runs at ideal peak performance (no utilization derating).
+- *Within a node* — the reader / compute / writer kernels run on that core's concurrent RISCs, so the node's time is the `max` of its kernels.
+- *Across nodes* — distinct nodes are separate cores in parallel, so the program time is the `max` over nodes.
 
-### Inputs
+```
+T_program = max_node( max_{k ∈ node} T_kernel(k) )
+```
 
-- **Hardware spec profile** (`HardwareProfile`):
-  Compute throughput (tiles/cycle by op-type +
-  dtype), NoC bandwidth (bytes/cycle by locality) + per-transfer latency, DRAM bandwidth, engine count, clock.
-- **Simulator trace**:
-  Per-op work-counts (tiles, bytes, locality) and the dependency/overlap **structure** (which kernels block on which DFBs/pipes).
+Under ideal-peak with full pipelining, connected producer/consumer kernels overlap in steady state, so there is no serial sum along a dependency chain. The roofline **is** the estimate, not a lower bound. The model is deterministic from (profile, trace) and needs no measured-cycle labels.
 
-### Model
-
-The trace supplies **structure**; it never supplies time. **Tick counts are never multiplied by a rate.** Cycles come from work ÷ rate:
-
-$$\text{compute op:}\quad cyc = \frac{\text{tiles}}{R_{\text{compute}}(\text{op\_type},\,\text{dtype})}$$
-
-$$\text{movement op:}\quad cyc = \text{latency} + \frac{\text{bytes}}{R_{\text{noc}}(\text{locality})}$$
-
-Within a kernel, the compute engine and the data-movement engine run concurrently, so the kernel time is the larger of the two serial paths:
-
-$$T_{\text{kernel}} = \max\!\big(\textstyle\sum cyc_{\text{compute}},\; \sum cyc_{\text{movement}}\big)$$
-
-Across kernels, under ideal-peak the program is **throughput-bound by its slowest kernel**: distinct nodes are separate cores running in parallel, and within a node the reader/compute/writer kernels share that core's concurrent RISCs. So the program time is the max over nodes of each node's max kernel:
-
-$$T_{\text{program}} = \max_{\text{node}} \; \max_{k \in \text{node}} T_{\text{kernel}}(k)$$
-
-Fill/drain latency and explicit cross-node serialization (the *latency* regime, needing the dependency DAG from `kernel_block.on` / dfb push-pop / pipe send-recv) are deferred.
-
-Under ideal-peak, the roofline **is** the estimate (not a lower bound). The model is deterministic from (spec, trace) and needs **no measured-cycle labels** to build or run.
+**Out of scope — the latency regime.**
+Fill/drain latency for small workloads and explicit cross-node serialization are not modelled. They would require the dependency DAG (`kernel_block.on`, dfb push/pop, pipe send/recv); the current model is throughput-only.
 
 ---
 
-## 4. Architecture & Modules change plan
+## Design Rationale — why ideal-peak, not fit-to-trace
 
-The one cross-package dependency is **new compute-op instrumentation in the simulator** — the trace does not currently record math ops at all (only `kernel_*`, `dfb_*`, `copy_*`, `operation_*`). Everything else is contained in `cycle_tools/`.
+The simulator tick is a **logical clock**: it increments by one per productive scheduler activation, measuring scheduling order rather than time (see `docs/TRACING.md`, *Logical Time*). It carries no wall-clock meaning and its value depends on the scheduler policy.
+
+Two consequences shape the model:
+
+- A tick duration cannot be multiplied by a rate to yield cycles. Any model fit to reconstruct tick durations predicts scheduling behavior, not hardware — reproducing a logical clock from its own sub-intervals is tautological.
+- Physical quantities in the trace are the **work-counts** (tiles, and bytes derived from tiles), not the timing. The estimator therefore multiplies work by hardware rates and ignores tick durations entirely.
+
+This is what lets the estimate be label-free and deterministic: given a profile and a trace, the answer is fixed, with no calibration step.
+
+---
+
+## Inputs
+
+### Hardware profile
+
+`HardwareProfile` (`cycles/types.py`) carries the rates that traces cannot provide:
+
+| Field | Meaning |
+|---|---|
+| `compute_rate` | tiles/cycle by `(op_type, dtype)` |
+| `compute_rate_default` | fallback tiles/cycle |
+| `noc_bw` | bytes/cycle by locality (`local_l1` / `remote_l1` / `dram`) |
+| `noc_latency` | fixed cycles per transfer, by locality |
+| `bytes_per_tile` | movement tile size (provisional; bf16 = 2048 B) |
+| `clock_ghz` | cycle↔ns reporting only; not used in the model |
+| `dm_engines` | reserved for future overlap modelling |
+
+Compute-rate lookup is tiered: exact `(op_type, dtype)`, then op-type-only `(op_type, "")`, then `compute_rate_default`. The op-type-only tier lets rates be keyed by op alone when the trace carries no dtype.
+
+Built-in profiles live in `hardware_profile.py`, looked up by name; custom profiles load from JSON. `--hw-profile <name | path.json>` selects one.
+
+Provenance:
+the `wormhole_b0` **movement** rates are seeded from tt-metal NoC data (cited inline); **compute** rates are provisional pending arch/ISA references.
+
+### Simulator trace — the consumed contract
+
+The estimator reads two event kinds and ignores all others:
+
+| Event | Category | Fields read | Produces |
+|---|---|---|---|
+| `compute_op` | `compute` | `op_type`, `dtype`, `tiles` | one compute `OpWork` |
+| `copy_end` | `copy` | `local_l1`, `remote_l1`, `dram` (tile counts) | one movement `OpWork` per non-zero locality |
+
+`compute_op` is emitted once per math op. `copy_end` carries per-locality tile counts for Tensor↔Block copies; pipe- or block-only copies carry no locality fields and contribute no movement work.
+
+The consumed set is declared as `parse.CONSUMED_EVENTS` and pinned against the producer's registry (`sim/trace.py`) by `test/sim/test_trace_contract.py`, so a producer-side rename fails a test rather than silently zeroing the estimate.
+
+A trace without `compute_op` events — produced before the instrumentation, or with the `compute` category filtered out — parses as movement-only.
+
+#### `compute_op` emission sites
+
+`op_type` and `tiles` are known only at the op site, so each op-family emits at its own chokepoint:
+
+| Site | Ops | `op_type` |
+|---|---|---|
+| `dfb.Block._binary_op` | `+ - * / //` | operator name (`add`/`sub`/`mul`/`truediv`/`floordiv`) |
+| `dfb.matmul` | matmul | `matmul` (tiles = M·K·N) |
+| `math._create_unary_op_wrapper` | `exp`, `rsqrt`, `sqrt`, `relu`, `sign`, … | op name |
+| `math._apply_unary_with_params` | `relu_max`, `clamp`, `elu`, `leaky_relu`, … | `eltwise_unary` (generic) |
+| `math._apply_binary_op` | `max`, `min`, `gt`, `lt`, `eq`, `ne` | `eltwise_binary` (generic) |
+| `math._reduce_impl` | reduce sum/max | `reduce_sum` / `reduce_max` |
+
+Not instrumented:
+`block.broadcast` and `block.transpose` (layout ops — instrumented only if the model should charge for them). `dtype` is not currently emitted, so compute-rate lookup falls back to the op-type-only tier.
+
+---
+
+## Output
+
+The pipeline produces one canonical `CycleEstimate`; every view is a pure function of it (compute once, render many).
+
+- **Summary** (default) — per-node roll-up: active nodes, per-node cycles, utilization, and a bound-class table (compute vs memory). `--include-zero-kernels`
+  also lists idle nodes.
+- **Detailed** (`--detailed`) — the full per-kernel table.
+- **JSON** (`--json-out`) — self-describing (`tool`, `schema_version`, profile, and er-kernel work + cycles).
+- **Re-render** (`--view-report REPORT.json`) — reload a saved JSON report and render it without re-running.
+
+Example summary tail:
+
+```
+Type         Nodes    Avg Cycles           Max   Max node
+..............................................................................
+compute          0          0.00          0.00   -
+memory          32       4934.36       4934.36   node0
+------------------------------------------------------------------------------
+Program cycles : 4934.36
+Active nodes   : 32 / 64  (32 idle)
+Bottleneck     : 32 nodes @ 4934.36 (memory-bound)
+```
+
+`Nodes` counts nodes *bound* by that resource; a node is memory-bound when its movement path exceeds its compute path.
+
+---
+
+## Command-Line Interface
+
+**Offline** — analyze a saved trace:
+
+```
+tt-lang-sim-cycles trace.jsonl
+    [--hw-profile NAME|FILE.json]   # built-in profile name or custom JSON
+    [--detailed]                    # full per-kernel table
+    [--json-out OUT.json]           # write a self-describing report
+    [--view-report REPORT.json]     # reload + render a saved report
+    [--include-zero-kernels]        # summary: also list idle nodes
+```
+
+**Inline** — run and estimate in one step:
+
+```
+tt-lang-sim prog.py --cycles [--trace trace.jsonl]
+```
+
+Runs the program, then prints the summary from the same in-memory trace (no file round-trip). Combine with `--trace` to also save the trace. `--cycles` uses the default hardware profile; drop to `tt-lang-sim-cycles` for profile and report options.
+
+---
+
+## Module Layout
 
 ```
 python/
-├─ sim/                          ← simulator · PRODUCER
-│  ├─ trace.py                   [CHANGE]  register new compute-op event + category (mechanism only)
-│  ├─ math.py                    [ADD]     emit per-op trace event (op_type, dtype, tiles) at op sites
-│  └─ greenlet_scheduler.py      [KEEP]
+├─ sim/                       simulator · PRODUCER
+│  ├─ trace.py                defines the compute event + category (registry)
+│  ├─ math.py, dfb.py         emit compute_op at op sites
+│  ├─ copy.py                 emits copy_end with per-locality tile counts
+│  └─ ttlang_sim.py           --trace / --cycles
 │
-└─ sim_stats/                    ← post-processing · CONSUMER · project main dir
-   ├─ __main__.py  (sim-stats)   [KEEP]
-   ├─ utils.py                   [KEEP]
-   ├─ cycle_estimator.py         [CHANGE]  compat shim + console entry; update re-exports
-   └─ cycle_tools/               ← the cycle estimator
-      ├─ parse.py                [CHANGE]  consume op events; demote tick-durations to diagnostics
-      ├─ types.py                [CHANGE]  EstimatorConfig → HardwareProfile; add per-op records
-      ├─ model.py                [REPLACE] additive sum → work÷rate + max (kernel & program)
-      ├─ hardware_profile.py     [ADD]     peak-rate spec table (Wormhole / Blackhole), named registry
-      ├─ schedule.py             [ADD]     overlap / throughput-bound combiner
-      ├─ report.py               [TRIM]    drop ablation_metrics + role_calibration; keep per-family/size
-      └─ cli.py                  [CHANGE]  drop tuning flags; add --hw-profile
+└─ sim_stats/                 trace analysis · CONSUMER
+   ├─ __main__.py             tt-lang-sim-stats (tensor/pipe/dfb tables)
+   ├─ utils.py                shared trace + kernel-name helpers
+   └─ cycles/                 the cycle estimator
+      ├─ __main__.py          entry point: python -m sim_stats.cycles
+      ├─ parse.py             trace → per-kernel work records; CONSUMED_EVENTS
+      ├─ types.py             HardwareProfile, OpWork, KernelWork, KernelEstimate, CycleEstimate
+      ├─ hardware_profile.py  built-in profile registry + JSON loader
+      ├─ schedule.py          op / kernel / program cycle combiners
+      ├─ model.py             build_estimate: work + profile → CycleEstimate
+      ├─ report.py            summary / detailed / JSON / reload renderers
+      └─ cli.py               argument wiring
 ```
 
-| module | action | detail |
-|---|---|---|
-| `sim/math.py` + `trace.py` | add / change | `math.py`: emit a per-op event (`op_type`, `dtype`, tiles) at each op site. `trace.py`: register the event + category (mechanism only). |
-| `parse.py` | change | build per-op work records and the dependency graph; keep `measured_cycles` and tick-durations **only as diagnostics**. |
-| `types.py` | change | replace `EstimatorConfig` placeholders with `HardwareProfile`; add per-op record types. |
-| `model.py` | replace | `work ÷ rate` per op; `max(compute, movement)` per kernel; remove additive sum, roofline-on-top, stall/sync/blocked terms and `mismatch_reason` escalation. |
-| `schedule.py` | add | overlap / throughput-bound combiner (`max` within node and across parallel nodes). |
-| `hardware_profile.py` | add | typed `HardwareProfile` registry of built-in parts (source of truth), looked up by name; plus `load_profile_json` / `resolve_profile` so `--hw-profile` accepts a built-in name or a custom `.json` path. |
-| `report.py` | trim | remove `ablation_metrics` + `role_calibration_suggestions`; per-kernel decomposition + per-family/size reporting. |
-| `cli.py` | change | drop model-tuning flags; add `--hw-profile`. |
-| `cycle_estimator.py` | change | update re-export list (drop `ablation_metrics`, `role_calibration_suggestions`, `mismatch_reason`); keep the `tt-lang-sim-cycles` entry. |
+The only cross-package coupling is the trace itself: the sim (producer) defines the event schema and emits events; `cycles` (consumer) reads the file. `--cycles` adds one lazy, one-directional import (`sim` → `sim_stats`) purely for ergonomics; `sim_stats` is top-level in both the source and installed layouts, so that import is stable.
 
-### Trace Instrumentation Detail
-
-- `trace()` is the generic mechanism; instrumentation calls live at the behavior site, exactly as `copy.py`/`dfb.py` do today. The compute-op call therefore belongs in `math.py`, not `trace.py`. `trace.py` only learns the new event name + category.
-- The change is **additive and non-breaking**:
-  Not touch the scheduler tick, so existing events, tick progression, and kernel spans are unchanged; `tt-lang-sim-stats` ignores unknown events; old traces still parse (treated as "no compute term"). Put the new event under its own trace category so it is filterable and trace size stays controllable.
-
-#### `compute_op` coverage (current instrumentation)
-
-`op_type`/`tiles` are only known at the op site, so each op-family emits at its own
-chokepoint. Covered so far:
-
-| site | ops | `op_type` |
-|---|---|---|
-| `dfb.Block._binary_op` | `+ - * / //` | operator name (add/sub/mul/truediv/floordiv) |
-| `dfb.matmul` | matmul | `matmul` (tiles = M·K·N) |
-| `math._create_unary_op_wrapper` | auto-gen unary (exp, rsqrt, sqrt, relu, sign, …) | op name |
-| `math._apply_unary_with_params` | relu_max, clamp, elu, leaky_relu, celu, prelu, softplus, hardtanh, round, threshold | `eltwise_unary` (generic — no name threaded) |
-| `math._apply_binary_op` | `max`, `min`, `gt`, `lt`, `eq`, `ne` | `eltwise_binary` (generic — no name threaded) |
-| `math._reduce_impl` | reduce_sum, reduce_max | `reduce_sum` / `reduce_max` |
-
-**Gaps (not yet emitting `compute_op`):**
-
-| site | ops | note |
-|---|---|---|
-| `block.broadcast` | broadcast | fan-out/layout — decide whether it counts as compute |
-| `block.transpose` | transpose | layout op — decide whether it counts as compute |
-| tile-level / other | — | anything not routed through the sites above |
-
-`_apply_unary_with_params` / `_apply_binary_op` use generic `op_type`s; thread a name from their callers if per-op compute rates are needed. Broadcast/transpose are layout ops — instrument them only if the compute model should charge for them.
+Today the estimator has its own runnable entry (`python -m sim_stats.cycles`, backed by `tt-lang-sim-cycles`), separate from the stats tool (`python -m sim_stats`). Unifying the two is an open question — see [Limitations & Deferred Work](#limitations--deferred-work).
 
 ---
 
-## 5. Removed in v1.0
+## Validation
 
-- `EstimatorConfig` tuning knobs: `*_block_scale`, per-event cycle costs, `flops_per_tile`, `peak_flops_per_cycle`, `blocked_cycle_weight`.
-- `report.ablation_metrics`, `report role_calibration_suggestions`.
-- `model.mismatch_reason` escalation gate.
-- The model-tuning CLI flags (already hidden in the current CLI).
+Under ideal-peak there are no hardware labels, so the estimator is validated for correctness, behavior, and sensitivity — not accuracy.
 
-### Removal readiness & order
+- **Correctness** (regression fixtures): invariants — `2× tiles → 2× compute cycles`; `max(compute, movement) ≤ estimate ≤ compute + movement` (never additive); zero work → zero cycles; determinism. Plus hand-derived cross-checks on simple kernels.
+- **Behavior**: per-kernel decomposition (compute vs movement, dominant term, bound class) across a work-count matrix (compute-bound / memory-bound / mixed / multi-node), small → large.
+- **Sensitivity**: sweep the profile and confirm estimates and bound class shift sensibly.
 
-**Prerequisites (met):** peak produces complete compute + movement estimates, is reachable (`--model peak`), and has summary / detailed / JSON / view-report. The sim `compute_op` instrumentation exists in this branch, so both movement and compute flow end-to-end.
-
-**Do atomically (or imports break):**
-- remove the v0.1 model (`estimate_kernel_cycles`, `EstimatorConfig`, `mismatch_reason`) and report helpers (`ablation_metrics`, `role_calibration_suggestions`);
-- slim `extract_kernel_features` / `KernelFeatures` down to the `measured_cycles` / `blocked_cycles` diagnostics, folded onto `KernelWork`;
-- update `cycle_estimator.py` + `cycle_tools/__init__.py` re-exports in the same change (they still name the removed symbols);
-- flip the default `--model` to peak; update tests.
-
-**Accept before making peak the default:**
-- compute rates are provisional placeholders (not hardware-validated);
-- coverage gaps mean some ops emit no `compute_op` — `max`/`min`/compare (via `math._apply_binary_op`), `block.broadcast`/`transpose` — so those show 0 compute. Closing the `_apply_binary_op` gap first is cheap and avoids a silent under-count;
-- keep the sim instrumentation and this removal on the same merge, so the peak default never ships without its producer.
+Accuracy against profiled device cycles (`tt-metal` `ReadDeviceProfilerResults`, `PROFILER build`) is deferred until profiling data exists; the residual against ideal-peak is the utilization factor for later non-ideal modelling.
 
 ---
 
-## 6. Validation approach
+## Limitations & Deferred Work
 
-Under ideal-peak there are **no hardware labels**, so v1.0 cannot be scored by accuracy. It is validated for correctness, behavior, and sensitivity; accuracy is deferred until profiling data exists.
-
-- **Correctness (regression fixtures):** invariants — `2× tiles → 2× compute cycles`, `estimate ≥ roofline lower bound`, `max(compute, movement) ≤ estimate ≤ compute + movement` (never additive), zero work → zero cycles, determinism. Plus hand-derived cross-checks on simple kernels. (Synthetic identifiability does not apply under ideal-peak — there is no fitting step.)
-- **Behavior:** per-kernel decomposition (compute vs movement, dominant term, bound class); coverage across a work-count matrix (compute-bound / memory-bound / mixed / multi-core / pipe), small → large.
-- **Sensitivity:** sweep the hardware spec and confirm estimates/bound-class shift sensibly.
-- **Deferred:** validate against profiled device cycles (tt-metal `ReadDeviceProfilerResults`, PROFILER build); the residual vs ideal-peak is the utilization factor for later non-ideal work.
-
----
-
-## Open decisions
-
-1. **Target part + spec source** — Wormhole or Blackhole? Peak rates from datasheet or known tt-metal constants? (blocks `hardware_profile.py`)
-2. **Trace instrumentation** — can the simulator emit `op_type` + `dtype` per compute op? (blocks the compute term; gates Phase 0 of validation)
-3. **Overlap model** — decided: `max(compute, movement)` per kernel; throughput-bound `max` across parallel nodes. Latency / critical-path regime (fill-drain, cross-node serialization) deferred.
-4. **Scope line** — ideal-peak is the v1.0 deliverable; measured-cycle validation is out of scope until later.
-
----
-
-## Implementation Checklist
-
-### Trace instrumentation (`python/sim/`) — prototyped in a local branch, not merged
-- [x] Register `compute_op` event + `compute` category in `trace.py`
-- [x] Emit at main op sites — binary (`Block._binary_op`), matmul, unary, reduce (`op_type` + `tiles`)
-- [x] New event under its own `compute` trace category (filterable)
-- [ ] `dtype` not yet emitted (falls back to `compute_rate_default`)
-- [ ] Coverage gaps: `block.broadcast`/`transpose`; `_apply_unary_with_params` / `_apply_binary_op` use generic labels — see coverage table above
-- [ ] Review + merge into the shared simulator module
-
-### Data model (`cycle_tools/types.py`)
-- [x] Add `HardwareProfile` (compute rates by op/dtype, NoC bw by locality, latency, clock, engines)
-- [x] Add per-op work-record type `OpWork` + `KernelWork` container (kind, op_type, dtype, tiles, locality)
-- [x] Remove v0.1 types (`EstimatorConfig`, old `KernelEstimate`, `KernelGroupEstimate`, `KernelFeatures`); rename `PeakKernel`/`PeakResult` → `KernelEstimate`/`CycleEstimate`
-- [x] Drop the logical-tick diagnostics (`measured_cycles`/`blocked_cycles`) — unused by the peak model
-
-### Parsing (`cycle_tools/parse.py`)
-- [x] Movement work records from `copy_end` localities (`extract_kernel_work`, alongside v0.1)
-- [x] Handle traces without compute-op events gracefully (movement-only, empty compute path)
-- [x] Consume `compute_op` events → compute work records (consumer done + tested against the contract; real traces await sim emission)
-- [ ] Reconstruct dependency/overlap structure (`kernel_block.on`, dfb push/pop, pipe send/recv) — deferred; only needed for the latency regime
-- [x] Remove `extract_kernel_features` (v0.1); tick-duration extraction dropped
-
-### Model & combiner (`cycle_tools/model.py`, `cycle_tools/schedule.py`)
-- [x] Per-op cost: compute = `tiles / rate`; movement = `latency + bytes / bw` (`schedule.op_cycles`)
-- [x] Kernel cost: `max(compute_path, movement_path)` (`schedule.kernel_cycles`)
-- [x] Program cost: throughput-bound `max` — parallel cores across nodes, concurrent RISCs within a node (`schedule.program_cycles`). DAG latency regime deferred.
-- [x] Remove additive sum, roofline-on-top, stall/sync/blocked terms (whole v0.1 `estimate_kernel_cycles`)
-- [x] Remove `mismatch_reason` escalation; rename `build_peak_result` → `build_estimate`
-
-### Hardware profile (`cycle_tools/hardware_profile.py`)
-- [x] Add `HardwareProfile` named registry (`get_profile`, scaffold, provisional rates)
-- [~] Fill the spec table — `wormhole_b0` **movement** rates seeded from tt-metal `noc_latencies.yaml` + soc descriptor; **compute** rates still pending arch/ISA docs
-- [x] Each rate documents its source (inline `# source:` citations to the tt-metal files)
-- [x] Custom-profile file loader — `load_profile_json` / `resolve_profile`; `--hw-profile <name|path.json>`
-
-### Reporting (`cycle_tools/report.py`)
-- [x] `CycleEstimate` canonical intermediate — render + JSON are pure functions of it
-- [x] Per-node **summary** (default, active nodes + utilization; `--include-zero-kernels` lists idle) + complete per-kernel **detailed** view (`--detailed`, all rows)
-- [x] JSON export (`--json-out`) — full, self-describing (`tool`/`schema_version`/profile)
-- [x] Reload + re-render a saved report (`--view-report`), with report-vs-trace validation
-- [x] Remove `ablation_metrics`, `role_calibration_suggestions`, `feature_provenance`, `print_report`, `write_json_report` (v0.1); renderers renamed `print_summary`/`print_detailed`/`write_json`/`load_estimate`
-- [ ] Per-family + per-size reporting (never a single global number)
-
-### CLI & entry (`cycle_tools/cli.py`, `cycle_estimator.py`, `cycle_tools/__init__.py`)
-- [x] `--hw-profile`, `--detailed`, `--json-out`, `--view-report`, `--include-zero-kernels`
-- [x] Drop v0.1 tuning flags and `--model`; peak is the only model (default, no flag)
-- [x] Trim `cycle_estimator.py` + `cycle_tools/__init__.py` re-exports to the current API
-
-### Validation
-- [x] Invariant tests (monotonicity, bounds, overlap=max-not-sum, determinism, zero-work) as regression fixtures
-- [x] Hand-derived cross-checks on simple kernels
-- [~] Synthetic identifiability check — N/A under ideal-peak (no fitting/calibration step to identify)
-- [ ] Behavioral coverage across the work-count matrix
-- [ ] Sensitivity sweep over the hardware spec
-- [ ] (Deferred) hardware-profile validation
-
-### Docs
-- [ ] Replace remaining v0.1 user-guide content with the v1.0 model + CLI reference
-- [ ] Document removed flags / breaking changes for users of `tt-lang-sim-cycles`
+- **Compute rates are provisional** — movement rates are seeded from tt-metal NoC data; compute rates await arch/ISA references.
+- **`dtype` is not emitted**, so compute rates are keyed by `op_type` alone.
+- **`broadcast` / `transpose` are not charged** as compute.
+- **Latency regime** (fill/drain, cross-node serialization) is outside the current throughput-bound model; it needs the dependency DAG.
+- **Behavioral-coverage and sensitivity sweeps**, and per-family / per-size reporting, are not yet built out.
+- **Unified `sim_stats` entry (open — needs discussion)** — a `python -m sim_stats stats|cycles` subcommand dispatcher instead of two separate entries; restructures the stats tool, so its own change.

@@ -11,6 +11,7 @@ import sys
 from pathlib import Path
 from typing import Any, Iterator
 
+
 def iter_events(path: Path) -> Iterator[dict[str, Any]]:
     """Yield parsed JSON objects from a JSON Lines file, skipping blank lines."""
     with path.open(encoding="utf-8") as f:
@@ -32,6 +33,13 @@ def node_from_kernel(kernel: str | None) -> str:
     if kernel and "-" in kernel:
         return kernel.split("-", 1)[0]
     return kernel or "unknown"
+
+
+def role_from_kernel(kernel: str) -> str:
+    """Classify a kernel as read / compute / write / other from its name suffix."""
+    node = node_from_kernel(kernel)
+    suffix = kernel.removeprefix(f"{node}-") if node != kernel else ""
+    return suffix if suffix in {"compute", "read", "write"} else "other"
 
 
 def as_int(value: Any) -> int:
@@ -64,4 +72,3 @@ def node_sort_key(node: str) -> int:
         return int(node.removeprefix("node"))
     except ValueError:
         return 0
-

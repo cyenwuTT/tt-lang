@@ -67,9 +67,17 @@ def _bottleneck(active: dict[str, tuple[float, float, float, str]]) -> str:
     return f"{len(at_max)} nodes @ {max_cy:.2f} ({bound_str}-bound)"
 
 
-def _stats_footer(estimate: CycleEstimate) -> None:
-    """Bound summary table + program/active/bottleneck stats. Shared by both views."""
-    rollup = _per_node_rollup(estimate)
+def _stats_footer(
+    estimate: CycleEstimate,
+    rollup: dict[str, tuple[float, float, float, str]] | None = None,
+) -> None:
+    """Bound summary table + program/active/bottleneck stats. Shared by both views.
+
+    ``rollup`` may be passed by a caller that already computed it (the summary view)
+    to avoid recomputing; the detailed view lets it default.
+    """
+    if rollup is None:
+        rollup = _per_node_rollup(estimate)
     active = {n: v for n, v in rollup.items() if v[2] > 0.0}
 
     # Bound summary table (active nodes only) — its own section.
@@ -104,8 +112,9 @@ def _stats_footer(estimate: CycleEstimate) -> None:
     print(_FRAME)
     if sum(k.compute_cycles for k in estimate.kernels) == 0.0:
         print(
-            "note: compute path is 0 — no compute_op events in this trace "
-            "(sim instrumentation pending); movement-only estimate."
+            "note: compute path is 0 — the trace has no compute_op events "
+            "(compute category filtered out, or a pre-instrumentation trace); "
+            "movement-only estimate."
         )
 
 
@@ -133,7 +142,7 @@ def print_summary(estimate: CycleEstimate, include_zero: bool = False) -> None:
         if not include_zero and cyc == 0.0:
             continue
         print(f"{node:<28} {compute:>12.2f} {movement:>12.2f} {cyc:>12.2f}  {bound}")
-    _stats_footer(estimate)
+    _stats_footer(estimate, rollup)
 
 
 def write_json(path: Path, estimate: CycleEstimate) -> None:

@@ -1,16 +1,16 @@
 # SPDX-FileCopyrightText: (c) 2026 Tenstorrent AI ULC
 #
 # SPDX-License-Identifier: Apache-2.0
-"""Overlap and critical-path combiner for the v1.0 analytical peak model.
+"""Overlap combiner for the analytical ideal-peak model.
 
-Scaffolding for the v0.1 -> v1.0 restructure:
+Turns per-op work into cycles and combines them:
 
-- :func:`kernel_cycles` implements the per-kernel ``max(compute, movement)``
-  combine and is ready for use.
-- :func:`program_cycles` is a PLACEHOLDER pending the dependency-DAG critical
-  path (Step 5 of the restructure plan).
+- :func:`op_cycles` — one op's ideal-peak cycles (work / peak-rate).
+- :func:`kernel_cycles` — per-kernel ``max(compute, movement)`` (concurrent engines).
+- :func:`program_cycles` — throughput-bound ``max`` within a node and across nodes.
 
-Not yet wired into the live estimation pipeline.
+The dependency-DAG latency regime (fill/drain, cross-node serialization) is out of
+scope; see docs/development/CycleEstimator.md.
 """
 
 from __future__ import annotations

@@ -54,6 +54,17 @@ class HardwareProfile:
         """Fixed per-transfer latency in cycles for a locality, or 0.0 if unknown."""
         return self.noc_latency.get(locality, 0.0)
 
+    def summary(self) -> dict[str, Any]:
+        """Serializable snapshot embedded in a report for reproducibility."""
+        return {
+            "name": self.name,
+            "clock_ghz": self.clock_ghz,
+            "bytes_per_tile": self.bytes_per_tile,
+            "compute_rate_default": self.compute_rate_default,
+            "noc_bw": dict(self.noc_bw),
+            "noc_latency": dict(self.noc_latency),
+        }
+
 
 @dataclass(frozen=True)
 class OpWork:
@@ -68,13 +79,10 @@ class OpWork:
 
 @dataclass
 class KernelWork:
-    """Per-kernel collection of op records plus dependency structure."""
+    """Per-kernel collection of op records extracted from the trace."""
 
     kernel: str
-    node_index: int = 0
     ops: list[OpWork] = field(default_factory=list[OpWork])
-    # DFB / pipe names this kernel blocks on; filled by the dependency pass.
-    blocks_on: list[str] = field(default_factory=list[str])
 
 
 @dataclass(frozen=True)

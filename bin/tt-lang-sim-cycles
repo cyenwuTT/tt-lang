@@ -6,7 +6,7 @@
 #
 # Estimates kernel cycle counts from a JSON Lines trace file produced by
 # tt-lang-sim --trace.
-# Usage: tt-lang-sim-cycles trace.jsonl [--model {phase,peak}] [--hw-profile NAME]
+# Usage: tt-lang-sim-cycles trace.jsonl [--hw-profile NAME] [--detailed] [--json-out FILE]
 
 PYTHON="${PYTHON:-python}"
 
@@ -18,12 +18,12 @@ _REPO_ROOT="$(dirname "$_SCRIPT_DIR")"
 # Sources: python/sim_stats; installed ttlang: python_packages/sim_stats.
 if [ -d "${_REPO_ROOT}/python/sim_stats" ]; then
     export PYTHONPATH="${_REPO_ROOT}/python${PYTHONPATH:+:${PYTHONPATH}}"
-    exec "$PYTHON" -m sim_stats.cycle_estimator "$@"
+    exec "$PYTHON" -m sim_stats.cycles "$@"
 fi
 
 if [ -d "${_REPO_ROOT}/python_packages/sim_stats" ]; then
     export PYTHONPATH="${_REPO_ROOT}/python_packages${PYTHONPATH:+:${PYTHONPATH}}"
-    exec "$PYTHON" -m sim_stats.cycle_estimator "$@"
+    exec "$PYTHON" -m sim_stats.cycles "$@"
 fi
 
 echo "tt-lang-sim-cycles: cannot locate the sim_stats package." >&2

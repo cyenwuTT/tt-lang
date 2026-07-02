@@ -7,14 +7,7 @@ from __future__ import annotations
 
 from .schedule import kernel_paths, program_cycles
 from .types import CycleEstimate, HardwareProfile, KernelEstimate, KernelWork
-from ..utils import node_from_kernel
-
-
-def _role_from_kernel(kernel: str) -> str:
-    """Derive read/compute/write/other from the kernel-name suffix."""
-    node = node_from_kernel(kernel)
-    suffix = kernel.removeprefix(f"{node}-") if node != kernel else ""
-    return suffix if suffix in {"compute", "read", "write"} else "other"
+from ..utils import node_from_kernel, role_from_kernel
 
 
 def build_estimate(kernels: list[KernelWork], hw: HardwareProfile) -> CycleEstimate:
@@ -26,7 +19,7 @@ def build_estimate(kernels: list[KernelWork], hw: HardwareProfile) -> CycleEstim
             KernelEstimate(
                 kernel=kw.kernel,
                 node=node_from_kernel(kw.kernel),
-                role=_role_from_kernel(kw.kernel),
+                role=role_from_kernel(kw.kernel),
                 compute_cycles=compute,
                 movement_cycles=movement,
                 cycles=max(compute, movement),
@@ -38,18 +31,9 @@ def build_estimate(kernels: list[KernelWork], hw: HardwareProfile) -> CycleEstim
     for ke in kernel_estimates:
         node_cycles[ke.node] = max(node_cycles.get(ke.node, 0.0), ke.cycles)
 
-    profile = {
-        "name": hw.name,
-        "clock_ghz": hw.clock_ghz,
-        "bytes_per_tile": hw.bytes_per_tile,
-        "compute_rate_default": hw.compute_rate_default,
-        "noc_bw": dict(hw.noc_bw),
-        "noc_latency": dict(hw.noc_latency),
-    }
-
     return CycleEstimate(
         profile_name=hw.name,
-        profile=profile,
+        profile=hw.summary(),
         program_cycles=program_cycles(kernels, hw),
         total_nodes=len(node_cycles),
         active_nodes=sum(1 for v in node_cycles.values() if v > 0.0),

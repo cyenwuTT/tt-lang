@@ -12,25 +12,25 @@ import json
 
 import pytest
 
-from python.sim_stats.cycle_tools.hardware_profile import (
+from python.sim_stats.cycles.hardware_profile import (
     load_profile_json,
     resolve_profile,
 )
-from python.sim_stats.cycle_tools.model import build_estimate
-from python.sim_stats.cycle_tools.parse import extract_kernel_work
-from python.sim_stats.cycle_tools.report import (
+from python.sim_stats.cycles.model import build_estimate
+from python.sim_stats.cycles.parse import extract_kernel_work
+from python.sim_stats.cycles.report import (
     load_estimate,
     print_detailed,
     print_summary,
     write_json,
 )
-from python.sim_stats.cycle_tools.schedule import (
+from python.sim_stats.cycles.schedule import (
     kernel_cycles,
     kernel_paths,
     op_cycles,
     program_cycles,
 )
-from python.sim_stats.cycle_tools.types import (
+from python.sim_stats.cycles.types import (
     HardwareProfile,
     KernelWork,
     OpWork,
@@ -71,7 +71,6 @@ def test_extract_kernel_work_emits_movement_op_per_locality() -> None:
     work = extract_kernel_work(events)
     kw = work["node0-read"]
 
-    assert kw.node_index == 0
     assert [(o.locality, o.tiles) for o in kw.ops] == [
         ("local_l1", 1),
         ("remote_l1", 2),

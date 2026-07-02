@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: (c) 2026 Tenstorrent AI ULC
 #
 # SPDX-License-Identifier: Apache-2.0
-"""Hardware spec profiles for the v1.0 analytical peak cycle model.
+"""Hardware spec profiles for the analytical ideal-peak cycle model.
 
 Canonical, reviewed peak-rate profiles for known parts live here as typed
 ``HardwareProfile`` objects (the source of truth), looked up by name via
@@ -15,8 +15,7 @@ serialization of ``HardwareProfile`` and may evolve as the field set does.
 
 NOTE: built-in **movement** rates are derived from tt-metal's measured NoC data
 (cited inline). Built-in **compute** rates are still placeholders pending arch/ISA
-throughput numbers and the compute_op instrumentation, so absolute estimates are
-not yet hardware-validated end-to-end.
+throughput numbers, so absolute estimates are not yet hardware-validated.
 """
 
 from __future__ import annotations

@@ -8,7 +8,11 @@ from __future__ import annotations
 from pathlib import Path
 
 from .types import KernelWork, OpWork, TraceEvent
-from ..utils import as_int, iter_events, node_from_kernel
+from ..utils import as_int, iter_events
+
+# Trace events this reader consumes. Defined by the producer in sim/trace.py;
+# pinned against its registry by test/sim/test_trace_contract.py.
+CONSUMED_EVENTS: frozenset[str] = frozenset({"compute_op", "copy_end"})
 
 
 def parse_trace(path: Path) -> list[TraceEvent]:
@@ -50,12 +54,7 @@ def extract_kernel_work(events: list[TraceEvent]) -> dict[str, KernelWork]:
 
         kw = work.get(kernel)
         if kw is None:
-            node = node_from_kernel(kernel)
-            try:
-                node_idx = int(node.replace("node", ""))
-            except (ValueError, AttributeError):
-                node_idx = 0
-            kw = KernelWork(kernel=kernel, node_index=node_idx)
+            kw = KernelWork(kernel=kernel)
             work[kernel] = kw
 
         if ev.event == "compute_op":
