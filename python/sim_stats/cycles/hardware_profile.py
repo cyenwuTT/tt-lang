@@ -13,9 +13,8 @@ The JSON mirrors the dataclass fields, with ``compute_rate`` encoded as a list o
 ``[op_type, dtype, rate]`` triples (JSON has no tuple keys). It is a thin
 serialization of ``HardwareProfile`` and may evolve as the field set does.
 
-NOTE: built-in **movement** rates are derived from tt-metal's measured NoC data
-(cited inline). Built-in **compute** rates are still placeholders pending arch/ISA
-throughput numbers, so absolute estimates are not yet hardware-validated.
+Built-in value provenance (sources + caveats) lives in the "wormhole_b0 provenance"
+table of docs/development/CycleEstimator.md.
 """
 
 from __future__ import annotations
@@ -25,28 +24,19 @@ from pathlib import Path
 
 from .types import HardwareProfile
 
-# Wormhole B0 (80 worker cores). Movement rates cited below; compute is a
-# placeholder (see module docstring). Sources under third-party/tt-metal/:
-#   noc_bw/noc_latency: impl/experimental/noc_estimator/latencies/noc_latencies.yaml
-#     (baseline row) -> 64 KB / 2589 cyc = 25.3 B/cyc; 64 B floor = 293 cyc.
-#   topology/clock:     soc_descriptors/wormhole_b0_80_arch.yaml; AICLK ~1 GHz.
+# Wormhole B0 (80 Tensix cores). Value sources + caveats: see the "wormhole_b0
+# provenance" table in docs/development/CycleEstimator.md.
+# Tile units differ per family: matmul = MAC volume (M*K*N), eltwise/unary/reduce
+# = output tiles.
 WORMHOLE_B0 = HardwareProfile(
     name="wormhole_b0",
-    # COMPUTE — PROVISIONAL placeholder rates (tiles/cycle), NOT hardware-validated;
-    # keyed by op_type with dtype="" (any dtype). Fill real per-(op, dtype) rates
-    # from arch/ISA docs later. Note the tile conventions differ and are not
-    # comparable: eltwise/unary/reduce emit output tiles; matmul emits MAC-tile
-    # volume (M*K*N).
-    compute_rate={("matmul", ""): 4096.0},  # placeholder, MAC-tiles/cycle
-    compute_rate_default=16.0,  # placeholder for eltwise / unary / reduce (tiles/cycle)
-    # NoC bytes/cycle (large-transfer asymptote). One cited number shared across
-    # localities for now; local_l1 is really faster — refine when sourced.
-    noc_bw={"local_l1": 25.3, "remote_l1": 25.3, "dram": 25.3},
-    # fixed per-transfer latency (cycles), from the small-transfer floor
-    noc_latency={"local_l1": 293.0, "remote_l1": 293.0, "dram": 293.0},
-    clock_ghz=1.0,  # nominal Wormhole AICLK
-    bytes_per_tile=2048.0,  # bf16 32x32 tile = 2 B * 1024
-    dm_engines=2,  # Tensix: NCRISC + BRISC
+    compute_rate={("matmul", ""): 1.0 / 64},  # tiles/cycle; HiFi4 (tt-lang default)
+    compute_rate_default=1.0 / 32,  # tiles/cycle (SFPU)
+    noc_bw={"local_l1": 25.3, "remote_l1": 25.3, "dram": 25.3},  # bytes/cycle
+    noc_latency={"local_l1": 293.0, "remote_l1": 293.0, "dram": 293.0},  # cycles
+    clock_ghz=1.0,  # GHz
+    bytes_per_tile=2048.0,  # bytes (bf16)
+    dm_engines=2,  # engines
 )
 
 _PROFILES: dict[str, HardwareProfile] = {

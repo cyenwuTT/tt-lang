@@ -828,6 +828,10 @@ class Block:
                 f"right shape {right_shape}. Use broadcast() to expand operands first."
             )
 
+        # [cycle-estimator] emit before the dry-run skip so dry-run records the work.
+        if TRACE.enabled:
+            trace("compute_op", op_type=op.__name__, tiles=len(self))
+
         # Skip the actual elementwise compute in dry-run: tile-grid shape and
         # source-block tracking are all the downstream pipeline needs. The
         # operands share a layout (checked above), so propagate it to the result.
@@ -836,9 +840,6 @@ class Block:
                 _dry_run_sentinel(self.layout), left_shape, other
             )
 
-        # [cycle-estimator] compute_op instrumentation
-        if TRACE.enabled:
-            trace("compute_op", op_type=op.__name__, tiles=len(self))
         # Perform operation
         return self._create_temporary_result(
             op(self._buf, other._buf), left_shape, other

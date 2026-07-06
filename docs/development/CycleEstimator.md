@@ -85,8 +85,20 @@ Compute-rate lookup is tiered: exact `(op_type, dtype)`, then op-type-only `(op_
 
 Built-in profiles live in `hardware_profile.py`, looked up by name; custom profiles load from JSON. `--hw-profile <name | path.json>` selects one.
 
-Provenance:
-the `wormhole_b0` **movement** rates are seeded from tt-metal NoC data (cited inline); **compute** rates are provisional pending arch/ISA references.
+#### `wormhole_b0` provenance
+
+All values are sourced from tt-metal and the Wormhole ISA docs:
+
+| Field | Value | Source |
+|---|---|---|
+| `clock_ghz` | 1.0 | WH AICLK (tt-metal perf docs) |
+| `bytes_per_tile` | 2048 | bf16 32×32 tile (32·32·2 B) |
+| `dm_engines` | 2 | BRISC + NCRISC (METALIUM_GUIDE) |
+| `noc_bw` / `noc_latency` | 25.3 B/cyc, 293 cyc | **measured**, tt-metal `noc_latencies.yaml` (64 KB / 2589 cyc asymptote; 293-cyc small-transfer floor) |
+| matmul rate | 1/64 (HiFi4) | `16 × fidelity` cyc per 32³ tile-MAC (LoFi 16 / HiFi2 32 / HiFi3 48 / HiFi4 64), from `GEMM_FLOPS` + ISA `MatrixUnit.md`. tt-lang sets no fidelity → inherits tt-metal's `ComputeConfig` default **HiFi4** (`kernel_types.hpp`) |
+| SFPU default | 1/32 | 32 elem/clk ideal 1-instruction floor (SFPU spec) |
+
+Known simplifications (see [Limitations](#limitations--deferred-work)): fidelity and dtype aren't traced — a 4× matmul swing that can flip the bound; `noc_bw` uses one measured asymptote for all localities (local L1 ≈ 2× remote, DRAM ≈ 24 B/cyc per channel); SFPU per-op cost (instruction count) is deferred.
 
 ### Simulator trace — the consumed contract
 
@@ -215,7 +227,7 @@ Accuracy against profiled device cycles (`tt-metal` `ReadDeviceProfilerResults`,
 
 ## Limitations & Deferred Work
 
-- **Compute rates are provisional** — movement rates are seeded from tt-metal NoC data; compute rates await arch/ISA references.
+- **Compute rates are partial** — the SFPU default is the ideal 1-instruction floor (32 elem/clk); real SFPU ops cost more, scaling with instruction count (kernel-dependent → profiling), and the SFPU unpack/pack-BW limit is not modelled. The matmul (FPU) rate is still a placeholder pending its cycles/tile spec.
 - **dtype-blind** — `dtype` is not emitted, so compute rates key on `op_type` alone, and movement uses a fixed `bytes_per_tile` (bf16) regardless of tensor dtype.
 - **`broadcast` / `transpose` are not charged** as compute.
 - **Latency regime** (fill/drain, cross-node serialization) is outside the current throughput-bound model; it needs the dependency DAG.
