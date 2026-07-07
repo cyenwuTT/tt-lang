@@ -3,9 +3,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """Cycle estimation package for simulator traces."""
 
-from .cli import build_pipeline, main
+from .cli import main
 from .model import build_estimate
-from .parse import extract_kernel_work, parse_trace
+from .parse import build_pipeline, extract_kernel_work, parse_trace
 from .report import (
     load_estimate,
     print_detailed,

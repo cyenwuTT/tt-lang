@@ -66,6 +66,14 @@ def format_float(value: float, digits: int = 2) -> str:
     return f"{value:.{digits}f}"
 
 
+def abbrev_count(value: float) -> str:
+    """Format a magnitude compactly with a K/M/B suffix, always 2 decimals."""
+    for suffix, divisor in (("", 1.0), ("K", 1e3), ("M", 1e6), ("B", 1e9)):
+        if round(abs(value) / divisor, 2) < 1000.0:
+            return f"{value / divisor:.2f}{suffix}"
+    return f"{value / 1e9:.2f}B"
+
+
 def node_sort_key(node: str) -> int:
     """Sort nodes numerically: node0 < node1 < ... < node10 (not node0, node1, node10)."""
     try:

@@ -83,3 +83,8 @@ def extract_kernel_work(events: list[TraceEvent]) -> dict[str, KernelWork]:
                     )
 
     return work
+
+
+def build_pipeline(path: Path) -> list[KernelWork]:
+    """Trace file -> per-kernel work records (parse + extract)."""
+    return list(extract_kernel_work(parse_trace(path)).values())

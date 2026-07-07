@@ -11,13 +11,13 @@ from pathlib import Path
 from typing import Any, cast
 
 from .types import CycleEstimate, KernelEstimate
-from ..utils import node_sort_key
+from ..utils import abbrev_count, node_sort_key
 
 _TOOL = "tt-lang-sim-cycles"
 _SCHEMA_VERSION = 1
 _MIN_WIDTH = 78
-_NUM_W = 12
-_MIN_LABEL = 28
+_NUM_W = 10  # numeric column width (fits headers + abbreviated values)
+_LABEL_PAD = 16  # gap between the label column and the first numeric column
 # label + 3 numeric cols (each led by a space) + two-space gap + widest bound.
 _ROW_TAIL = 3 * (_NUM_W + 1) + 2 + len("compute")
 
@@ -28,16 +28,17 @@ def _short_bound(bound: str) -> str:
 
 
 def _label_width(labels: list[str], header: str) -> int:
-    """Column width that fits every label, the header, and a sensible minimum."""
-    return max([_MIN_LABEL, len(header), *(len(x) for x in labels)])
+    """Label column sized to the longest label (or header), plus a small pad."""
+    longest = max((len(x) for x in labels), default=0)
+    return max(len(header), longest) + _LABEL_PAD
 
 
 def _row(
     label: str, compute: float, movement: float, cycles: float, bound: str, label_w: int
 ) -> str:
     return (
-        f"{label:<{label_w}} {compute:>{_NUM_W}.2f} "
-        f"{movement:>{_NUM_W}.2f} {cycles:>{_NUM_W}.2f}  {bound}"
+        f"{label:<{label_w}} {abbrev_count(compute):>{_NUM_W}} "
+        f"{abbrev_count(movement):>{_NUM_W}} {abbrev_count(cycles):>{_NUM_W}}  {bound}"
     )
 
 
@@ -81,8 +82,8 @@ def _bottleneck(active: dict[str, tuple[float, float, float, str]]) -> str:
     bounds = sorted({b for _, b in at_max})
     bound_str = bounds[0] if len(bounds) == 1 else "/".join(bounds)
     if len(at_max) == 1:
-        return f"{at_max[0][0]} @ {max_cy:.2f} ({bound_str}-bound)"
-    return f"{len(at_max)} nodes @ {max_cy:.2f} ({bound_str}-bound)"
+        return f"{at_max[0][0]} @ {abbrev_count(max_cy)} ({bound_str}-bound)"
+    return f"{len(at_max)} nodes @ {abbrev_count(max_cy)} ({bound_str}-bound)"
 
 
 def _stats_footer(
@@ -118,12 +119,15 @@ def _stats_footer(
         else:
             avg = max_cy = 0.0
             max_node = "-"
-        print(f"{bound:<10}{count:>8}{avg:>14.2f}{max_cy:>14.2f}   {max_node}")
+        print(
+            f"{bound:<10}{count:>8}{abbrev_count(avg):>14}"
+            f"{abbrev_count(max_cy):>14}   {max_node}"
+        )
 
     # Summary — its own section.
     idle = estimate.total_nodes - estimate.active_nodes
     print("-" * width)
-    print(f"Program cycles : {estimate.program_cycles:.2f}")
+    print(f"Program cycles : {abbrev_count(estimate.program_cycles)}")
     print(
         f"Active nodes   : {estimate.active_nodes} / {estimate.total_nodes}  ({idle} idle)"
     )

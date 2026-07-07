@@ -568,7 +568,9 @@ def main() -> None:
             events = get_context().trace_events
             if args.trace:
                 _write_jsonl_trace(Path(args.trace), events)
-            if args.cycles is not None:
+            # Only estimate when the run produced a trace; a missing file or early
+            # failure leaves events empty -> nothing to report.
+            if args.cycles is not None and events:
                 _print_cycle_estimate(events, args.cycles or None, args.hw_profile)
 
 

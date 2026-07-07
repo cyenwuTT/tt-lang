@@ -11,15 +11,9 @@ from pathlib import Path
 
 from .hardware_profile import DEFAULT, resolve_profile
 from .model import build_estimate
-from .parse import extract_kernel_work, parse_trace
+from .parse import build_pipeline
 from .report import load_estimate, print_detailed, print_summary, write_json
-from .types import CycleEstimate, KernelWork
-
-
-def build_pipeline(trace_path: Path) -> list[KernelWork]:
-    """Trace -> per-kernel work records."""
-    events = parse_trace(trace_path)
-    return list(extract_kernel_work(events).values())
+from .types import CycleEstimate
 
 
 def main() -> None:
@@ -103,7 +97,16 @@ def main() -> None:
         print(f"Error: {exc}", file=sys.stderr)
         sys.exit(1)
 
-    estimate = build_estimate(build_pipeline(trace_path), hw)
+    work = build_pipeline(trace_path)
+    if not work:
+        print(
+            f"Error: no kernel work in {trace_path} "
+            "(is it a tt-lang-sim --trace file?)",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    estimate = build_estimate(work, hw)
     _render(estimate)
     if args.json_out is not None:
         out_path = args.json_out.resolve()
