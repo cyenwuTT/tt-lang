@@ -12,25 +12,24 @@ import json
 
 import pytest
 
-from python.sim_stats.cycles.hardware_profile import (
+from python.sim_stats.cycles.model import (
+    build_estimate,
+    kernel_cycles,
+    kernel_paths,
     load_profile_json,
+    op_cycles,
+    per_node_rollup,
+    program_breakdown,
+    program_cycles,
     resolve_profile,
+    total_dram_bytes,
 )
-from python.sim_stats.cycles.model import build_estimate
 from python.sim_stats.cycles.parse import extract_kernel_work
 from python.sim_stats.cycles.report import (
     load_estimate,
     print_detailed,
     print_summary,
     write_json,
-)
-from python.sim_stats.cycles.schedule import (
-    kernel_cycles,
-    kernel_paths,
-    op_cycles,
-    program_breakdown,
-    program_cycles,
-    total_dram_bytes,
 )
 from python.sim_stats.cycles.types import (
     HardwareProfile,
@@ -434,14 +433,31 @@ def test_per_node_max_reason_matches_slowest_node() -> None:
             ops=[OpWork(kind="compute", op_type="matmul", dtype="bf16", tiles=16)],
         ),  # compute 8 cyc, dominates
     ]
-    from python.sim_stats.cycles.report import _per_node_max, _per_node_rollup
-
     estimate = build_estimate(kernels, hw)
-    rollup = _per_node_rollup(estimate)
-    active = {n: v for n, v in rollup.items() if v[2] > 0.0}
-    node_max, reason = _per_node_max(active)
-    assert node_max == 8.0
-    assert reason == "compute"
+    assert estimate.node_bound == 8.0
+    assert estimate.node_bound_reason == "compute"
+
+
+def test_per_node_rollup_maxes_over_a_nodes_kernels() -> None:
+    # A node's compute/movement/cycles are the max over its kernels.
+    hw = _hw_with_dram_ceiling(2.0)
+    kernels = [
+        _read_kernel("node0", dram_tiles=4),  # movement 4 cyc
+        KernelWork(
+            kernel="node0-compute",
+            ops=[OpWork(kind="compute", op_type="matmul", dtype="bf16", tiles=10)],
+        ),  # compute 5 cyc
+    ]
+    nodes = per_node_rollup(build_estimate(kernels, hw).kernels)
+    assert len(nodes) == 1
+    n = nodes[0]
+    assert (n.node, n.compute, n.movement, n.cycles, n.bound) == (
+        "node0",
+        5.0,
+        4.0,
+        5.0,
+        "compute",
+    )
 
 
 def test_empty_bound_row_shows_dash_not_zero(capsys) -> None:

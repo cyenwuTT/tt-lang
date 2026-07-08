@@ -9,11 +9,10 @@ import argparse
 import sys
 from pathlib import Path
 
-from .hardware_profile import DEFAULT, resolve_profile
-from .model import build_estimate
+from .model import build_estimate, resolve_profile
 from .parse import build_pipeline
 from .report import load_estimate, print_detailed, print_summary, write_json
-from .types import CycleEstimate
+from .types import DEFAULT, CycleEstimate
 
 
 def main() -> None:

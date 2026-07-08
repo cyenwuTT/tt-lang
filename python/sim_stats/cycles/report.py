@@ -10,7 +10,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any, cast
 
-from .types import CycleEstimate, KernelEstimate
+from .types import CycleEstimate, KernelEstimate, NodeEstimate
 from ..utils import abbrev_count, node_sort_key
 
 _TOOL = "tt-lang-sim-cycles"
@@ -42,24 +42,6 @@ def _row(
     )
 
 
-def _per_node_rollup(
-    estimate: CycleEstimate,
-) -> dict[str, tuple[float, float, float, str]]:
-    """Per-node (compute, movement, cycles, bound) — max over the node's kernels."""
-    agg: dict[str, tuple[float, float, float]] = {}
-    for ke in estimate.kernels:
-        c, m, cy = agg.get(ke.node, (0.0, 0.0, 0.0))
-        agg[ke.node] = (
-            max(c, ke.compute_cycles),
-            max(m, ke.movement_cycles),
-            max(cy, ke.cycles),
-        )
-    return {
-        node: (c, m, cy, "compute" if c > m else "memory")
-        for node, (c, m, cy) in agg.items()
-    }
-
-
 def _header(estimate: CycleEstimate, unit: str, label_w: int, width: int) -> None:
     print("\n" + "=" * width)
     print("Cycle Estimate — ideal-peak model")
@@ -85,52 +67,30 @@ def _human_bytes(n: float) -> str:
     return f"{n / 1e9:.1f} GB"
 
 
-def _per_node_max(
-    active: dict[str, tuple[float, float, float, str]],
-) -> tuple[float, str]:
-    """The slowest node's cycles and its bound reason (compute/memory).
-
-    This is schedule's per-node bound; ties break by node order for a stable
-    reason. Empty (no active nodes) -> (0.0, "-").
-    """
-    if not active:
-        return 0.0, "-"
-    max_cy = max(v[2] for v in active.values())
-    at_max = (n for n, v in active.items() if v[2] == max_cy)
-    slowest = sorted(at_max, key=node_sort_key)
-    return max_cy, active[slowest[0]][3]
-
-
-def _stats_footer(
-    estimate: CycleEstimate,
-    width: int,
-    rollup: dict[str, tuple[float, float, float, str]] | None = None,
-) -> None:
+def _stats_footer(estimate: CycleEstimate, width: int) -> None:
     """Bound summary table, optional DRAM block, and program/per-node stats.
 
-    ``rollup`` may be passed by a caller that already computed it (the summary view)
-    to avoid recomputing; the detailed view lets it default.
+    A pure read of the pre-computed ``estimate.nodes`` / ``node_bound`` — no
+    cycle math happens here.
     """
-    if rollup is None:
-        rollup = _per_node_rollup(estimate)
-    active = {n: v for n, v in rollup.items() if v[2] > 0.0}
+    active = [n for n in estimate.nodes if n.cycles > 0.0]
 
     # Bound summary table (active nodes only) — its own section.
     print("-" * width)
     print(f"{'Type':<10}{'Nodes':>8}{'Avg Cycles':>14}{'Max':>14}   Max node")
     print("." * width)
-    by_bound: dict[str, list[tuple[str, float]]] = {}
-    for node, (_c, _m, cy, bound) in active.items():
-        by_bound.setdefault(bound, []).append((node, cy))
+    by_bound: dict[str, list[NodeEstimate]] = {}
+    for n in active:
+        by_bound.setdefault(n.bound, []).append(n)
     for bound in ("compute", "memory"):  # always show both types
         rows = by_bound.get(bound, [])
         count = len(rows)
         if rows:
-            avg = sum(cy for _, cy in rows) / count
-            max_cy = max(cy for _, cy in rows)
-            max_node = sorted((n for n, cy in rows if cy == max_cy), key=node_sort_key)[
-                0
-            ]
+            avg = sum(n.cycles for n in rows) / count
+            max_cy = max(n.cycles for n in rows)
+            max_node = sorted(
+                (n.node for n in rows if n.cycles == max_cy), key=node_sort_key
+            )[0]
             avg_s, max_s = abbrev_count(avg), abbrev_count(max_cy)
         else:
             # Empty bound: dashes rather than 0.00, matching the "Max node" column.
@@ -154,12 +114,12 @@ def _stats_footer(
 
     # Summary — its own section.
     idle = estimate.total_nodes - estimate.active_nodes
-    node_max, node_reason = _per_node_max(active)
     nodes = f"{estimate.active_nodes} / {estimate.total_nodes}"
     print("-" * width)
     prog = abbrev_count(estimate.program_cycles)
+    node_max = abbrev_count(estimate.node_bound)
     print(_kv("Program cycles", prog, estimate.program_bound))
-    print(_kv("Per-node max", abbrev_count(node_max), node_reason))
+    print(_kv("Per-node max", node_max, estimate.node_bound_reason))
     print(_kv("Active nodes", nodes, f"{idle} idle"))
     print("=" * width)
     if sum(k.compute_cycles for k in estimate.kernels) == 0.0:
@@ -193,18 +153,16 @@ def print_summary(estimate: CycleEstimate, include_zero: bool = False) -> None:
     """Per-node rollup (the default view).
 
     Each node's columns are the max over its kernels (concurrent RISCs), matching
-    the program combiner.
+    the program combiner — a pure read of ``estimate.nodes``.
     """
-    rollup = _per_node_rollup(estimate)
-    label_w = _label_width(list(rollup), "Node")
+    label_w = _label_width([n.node for n in estimate.nodes], "Node")
     width = max(_MIN_WIDTH, label_w + _ROW_TAIL)
     _header(estimate, "Node", label_w, width)
-    for node in sorted(rollup, key=node_sort_key):
-        compute, movement, cyc, bound = rollup[node]
-        if not include_zero and cyc == 0.0:
+    for n in sorted(estimate.nodes, key=lambda n: node_sort_key(n.node)):
+        if not include_zero and n.cycles == 0.0:
             continue
-        print(_row(node, compute, movement, cyc, bound, label_w))
-    _stats_footer(estimate, width, rollup)
+        print(_row(n.node, n.compute, n.movement, n.cycles, n.bound, label_w))
+    _stats_footer(estimate, width)
 
 
 def write_json(path: Path, estimate: CycleEstimate) -> None:
@@ -218,8 +176,11 @@ def write_json(path: Path, estimate: CycleEstimate) -> None:
         "program_bound": estimate.program_bound,
         "dram_floor": estimate.dram_floor,
         "total_dram_bytes": estimate.total_dram_bytes,
+        "node_bound": estimate.node_bound,
+        "node_bound_reason": estimate.node_bound_reason,
         "total_nodes": estimate.total_nodes,
         "active_nodes": estimate.active_nodes,
+        "nodes": [asdict(n) for n in estimate.nodes],
         "kernels": [asdict(k) for k in estimate.kernels],
     }
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
@@ -259,6 +220,8 @@ def load_estimate(path: Path | str) -> CycleEstimate:
     try:
         raw_kernels: list[dict[str, Any]] = data["kernels"]
         kernels = [KernelEstimate(**k) for k in raw_kernels]
+        raw_nodes: list[dict[str, Any]] = data.get("nodes", [])
+        nodes = [NodeEstimate(**n) for n in raw_nodes]
         profile: dict[str, Any] = data.get("profile", {})
         return CycleEstimate(
             profile_name=str(profile.get("name", data.get("profile_name", "?"))),
@@ -270,6 +233,9 @@ def load_estimate(path: Path | str) -> CycleEstimate:
             program_bound=str(data.get("program_bound", "per-node")),
             dram_floor=float(data.get("dram_floor", 0.0)),
             total_dram_bytes=float(data.get("total_dram_bytes", 0.0)),
+            nodes=nodes,
+            node_bound=float(data.get("node_bound", 0.0)),
+            node_bound_reason=str(data.get("node_bound_reason", "compute")),
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise ValueError(f"malformed cycle report {p}: {exc}") from None

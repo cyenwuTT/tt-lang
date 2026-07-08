@@ -21,8 +21,9 @@ class TraceEvent:
 class HardwareProfile:
     """Static hardware spec: the rates the trace can't provide (how fast the part runs).
 
-    Built-in profiles live in ``hardware_profile.py`` (looked up by name); custom
-    ones load from JSON via ``load_profile_json``.
+    Built-in profile instances (``WORMHOLE_B0``, ``DEFAULT``) are defined at the
+    bottom of this module (data only). Name/path resolution and JSON loading live
+    in :mod:`model` (``resolve_profile`` / ``load_profile_json`` / ``get_profile``).
     """
 
     name: str
@@ -110,6 +111,17 @@ class KernelEstimate:
 
 
 @dataclass(frozen=True)
+class NodeEstimate:
+    """Per-node rollup row: the max over a node's kernels (concurrent RISCs)."""
+
+    node: str
+    compute: float
+    movement: float
+    cycles: float
+    bound: str  # "compute" | "memory"
+
+
+@dataclass(frozen=True)
 class CycleEstimate:
     """Canonical estimate result: the intermediate that render + JSON share.
 
@@ -127,3 +139,33 @@ class CycleEstimate:
     program_bound: str = "per-node"  # "per-node" | "aggregate-dram"
     dram_floor: float = 0.0
     total_dram_bytes: float = 0.0
+    nodes: list[NodeEstimate] = field(default_factory=list[NodeEstimate])
+    node_bound: float = 0.0  # max over nodes of per-node cycles
+    node_bound_reason: str = "compute"  # bound of the slowest node ("compute"|"memory")
+
+
+# ---------------------------------------------------------------------------
+# Built-in hardware profiles
+# ---------------------------------------------------------------------------
+
+# Wormhole B0 (80 Tensix cores). Value sources + caveats: see the "wormhole_b0
+# provenance" table in docs/development/CycleEstimator.md.
+# Tile units differ per family: matmul = MAC volume (M*K*N), eltwise/unary/reduce
+# = output tiles.
+WORMHOLE_B0 = HardwareProfile(
+    name="wormhole_b0",
+    compute_rate={("matmul", ""): 1.0 / 64},  # tiles/cycle; HiFi4 (tt-lang default)
+    compute_rate_default=1.0 / 32,  # tiles/cycle (SFPU)
+    noc_bw={"local_l1": 25.3, "remote_l1": 25.3, "dram": 25.3},  # bytes/cycle
+    noc_latency={"local_l1": 293.0, "remote_l1": 293.0, "dram": 293.0},  # cycles
+    clock_ghz=1.0,  # GHz
+    bytes_per_tile=2048.0,  # bytes (bf16)
+    dm_engines=2,  # engines
+    dram_aggregate_bw=288.0,  # bytes/cycle (shared GDDR6 pool); see provenance table
+)
+
+_PROFILES: dict[str, HardwareProfile] = {
+    WORMHOLE_B0.name: WORMHOLE_B0,
+}
+
+DEFAULT = WORMHOLE_B0

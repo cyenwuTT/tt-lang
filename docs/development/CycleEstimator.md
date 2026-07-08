@@ -87,8 +87,8 @@ This is what lets the estimate be label-free and deterministic: given a profile 
 
 Compute-rate lookup is tiered: exact `(op_type, dtype)`, then op-type-only `(op_type, "")`, then `compute_rate_default`. The op-type-only tier lets rates be keyed by op alone when the trace carries no dtype.
 
-Built-in profiles live in `hardware_profile.py`, looked up by name;
-custom profiles load from JSON. `--hw-profile <name | path.json>` selects one.
+Built-in profile data lives in `types.py` (looked up by name); resolution and
+JSON loading live in `model.py`. `--hw-profile <name | path.json>` selects one.
 
 #### `wormhole_b0` provenance
 
@@ -211,10 +211,8 @@ python/
    └─ cycles/                 the cycle estimator
       ├─ __main__.py          entry point: python -m sim_stats.cycles
       ├─ parse.py             trace → per-kernel work records; CONSUMED_EVENTS
-      ├─ types.py             HardwareProfile, OpWork, KernelWork, KernelEstimate, CycleEstimate
-      ├─ hardware_profile.py  built-in profile registry + JSON loader
-      ├─ schedule.py          op / kernel / program cycle combiners
-      ├─ model.py             build_estimate: work + profile → CycleEstimate
+      ├─ types.py             dataclasses + built-in profile data (WORMHOLE_B0, DEFAULT)
+      ├─ model.py             cycle math, per-node rollup, profile resolvers, build_estimate
       ├─ report.py            summary / detailed / JSON / reload renderers
       └─ cli.py               argument wiring
 ```

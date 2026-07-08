@@ -4,7 +4,7 @@
 """Cycle estimation package for simulator traces."""
 
 from .cli import main
-from .model import build_estimate
+from .model import build_estimate, load_profile_json, resolve_profile
 from .parse import build_pipeline, extract_kernel_work, parse_trace
 from .report import (
     load_estimate,
@@ -13,10 +13,12 @@ from .report import (
     write_json,
 )
 from .types import (
+    DEFAULT,
     CycleEstimate,
     HardwareProfile,
     KernelEstimate,
     KernelWork,
+    NodeEstimate,
     OpWork,
     TraceEvent,
 )
@@ -27,11 +29,15 @@ __all__ = [
     "OpWork",
     "KernelWork",
     "KernelEstimate",
+    "NodeEstimate",
     "CycleEstimate",
+    "DEFAULT",
     "parse_trace",
     "extract_kernel_work",
     "build_estimate",
     "build_pipeline",
+    "resolve_profile",
+    "load_profile_json",
     "print_summary",
     "print_detailed",
     "write_json",
