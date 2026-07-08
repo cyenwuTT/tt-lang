@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import json
-import math
 import sys
 from pathlib import Path
 from typing import Any, Iterator
@@ -51,19 +50,6 @@ def as_int(value: Any) -> int:
     if isinstance(value, (float, str)):
         return int(value)
     return 0
-
-
-def format_float(value: float, digits: int = 2) -> str:
-    """Format a float, handling special values (nan, inf)."""
-    if value == 0.0:
-        return f"0.{('0' * digits)}"
-    if value == math.inf:
-        return "inf"
-    if value == -math.inf:
-        return "-inf"
-    if math.isnan(value):
-        return "n/a"
-    return f"{value:.{digits}f}"
 
 
 def abbrev_count(value: float) -> str:
