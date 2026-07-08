@@ -33,6 +33,7 @@ class HardwareProfile:
     clock_ghz: float  # cycle<->ns reporting only, not used in the model
     bytes_per_tile: float  # movement tile size (provisional; bf16 = 2048 B)
     dm_engines: int = 1  # reserved for future overlap modelling
+    dram_aggregate_bw: float = 0.0  # shared DRAM peak, bytes/cycle (0 = off)
 
     def rate_for(self, op_type: str, dtype: str = "") -> float:
         """Peak tiles/cycle for an op.
@@ -54,6 +55,15 @@ class HardwareProfile:
         """Fixed per-transfer latency in cycles for a locality, or 0.0 if unknown."""
         return self.noc_latency.get(locality, 0.0)
 
+    def aggregate_dram_bandwidth(self) -> float:
+        """Program-wide shared DRAM peak in bytes/cycle, or 0.0 if unmodeled.
+
+        Unlike ``noc_bw["dram"]`` (a per-core NoC lane), this is the single
+        GDDR6 controller pool shared by all cores. 0.0 means no program-level
+        ceiling (legacy behavior).
+        """
+        return self.dram_aggregate_bw
+
     def summary(self) -> dict[str, Any]:
         """Serializable snapshot embedded in a report for reproducibility."""
         return {
@@ -63,6 +73,7 @@ class HardwareProfile:
             "compute_rate_default": self.compute_rate_default,
             "noc_bw": dict(self.noc_bw),
             "noc_latency": dict(self.noc_latency),
+            "dram_aggregate_bw": self.dram_aggregate_bw,
         }
 
 
@@ -113,3 +124,6 @@ class CycleEstimate:
     total_nodes: int
     active_nodes: int
     kernels: list[KernelEstimate] = field(default_factory=list[KernelEstimate])
+    program_bound: str = "per-node"  # "per-node" | "aggregate-dram"
+    dram_floor: float = 0.0
+    total_dram_bytes: float = 0.0

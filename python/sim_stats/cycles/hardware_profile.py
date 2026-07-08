@@ -37,6 +37,7 @@ WORMHOLE_B0 = HardwareProfile(
     clock_ghz=1.0,  # GHz
     bytes_per_tile=2048.0,  # bytes (bf16)
     dm_engines=2,  # engines
+    dram_aggregate_bw=288.0,  # bytes/cycle (shared GDDR6 pool); see provenance table
 )
 
 _PROFILES: dict[str, HardwareProfile] = {
@@ -86,6 +87,7 @@ def load_profile_json(path: Path | str) -> HardwareProfile:
             clock_ghz=float(data["clock_ghz"]),
             bytes_per_tile=float(data["bytes_per_tile"]),
             dm_engines=int(data.get("dm_engines", 1)),
+            dram_aggregate_bw=float(data.get("dram_aggregate_bw", 0.0)),
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise ValueError(f"malformed hardware profile {p}: {exc}") from None

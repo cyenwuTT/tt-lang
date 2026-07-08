@@ -7,7 +7,8 @@ Turns per-op work into cycles and combines them:
 
 - :func:`op_cycles` — one op's ideal-peak cycles (work / peak-rate).
 - :func:`kernel_cycles` — per-kernel ``max(compute, movement)`` (concurrent engines).
-- :func:`program_cycles` — throughput-bound ``max`` within a node and across nodes.
+- :func:`program_cycles` — throughput-bound ``max`` within a node and across nodes,
+  floored by the shared aggregate-DRAM ceiling (:func:`program_breakdown`).
 
 The dependency-DAG latency regime (fill/drain, cross-node serialization) is out of
 scope; see docs/development/CycleEstimator.md.
@@ -39,6 +40,21 @@ def kernel_paths(work: KernelWork, hw: HardwareProfile) -> tuple[float, float]:
     return compute_path, movement_path
 
 
+def total_dram_bytes(kernels: list[KernelWork], hw: HardwareProfile) -> float:
+    """Program-wide bytes that hit the shared GDDR6 pool.
+
+    Only ``locality == "dram"`` movement counts: local-L1 and remote-L1
+    (multicast) traffic never touches the DRAM controller and must be excluded
+    from the aggregate ceiling.
+    """
+    return sum(
+        o.tiles * hw.bytes_per_tile
+        for k in kernels
+        for o in k.ops
+        if o.kind == "movement" and o.locality == "dram"
+    )
+
+
 def kernel_cycles(work: KernelWork, hw: HardwareProfile) -> float:
     """Ideal-peak kernel cycles: the larger of the compute and movement paths.
 
@@ -58,16 +74,43 @@ def program_cycles(kernels: list[KernelWork], hw: HardwareProfile) -> float:
       - across nodes: distinct nodes are separate cores running in parallel, so
         the program time is the ``max`` over nodes.
 
-    Net: the program is throughput-bound by its slowest kernel. Under ideal-peak
-    with full pipelining, connected producer/consumer kernels overlap in steady
-    state, so there is no serial sum along a dependency chain.
+    A third bound sits above the two overlaps: the shared GDDR6 pool, taken as a
+    ``max`` with the per-node bound (see :func:`program_breakdown`). Rationale
+    and the deferred latency regime: docs/development/CycleEstimator.md.
+    """
+    return program_breakdown(kernels, hw)[0]
 
-    Deferred (would need the dependency DAG from kernel_block.on / dfb push-pop /
-    pipe send-recv): fill/drain latency for small workloads, and explicit
-    cross-node serialization — i.e. the latency regime rather than throughput.
+
+def program_breakdown(
+    kernels: list[KernelWork], hw: HardwareProfile
+) -> tuple[float, str, float, float]:
+    """Program cycles plus which bound set them.
+
+    Returns ``(program_cycles, program_bound, dram_floor, node_bound)`` where
+    ``program_bound`` is ``"aggregate-dram"`` if the shared DRAM floor dominates,
+    else ``"per-node"``. See :func:`program_cycles` for the model rationale.
     """
     per_node: dict[str, float] = {}
     for k in kernels:
         node = node_from_kernel(k.kernel)
         per_node[node] = max(per_node.get(node, 0.0), kernel_cycles(k, hw))
-    return max(per_node.values(), default=0.0)
+    node_bound = max(per_node.values(), default=0.0)
+    return program_from_node_bound(kernels, hw, node_bound)
+
+
+def program_from_node_bound(
+    kernels: list[KernelWork], hw: HardwareProfile, node_bound: float
+) -> tuple[float, str, float, float]:
+    """Select the program bound given an already-computed per-node ``node_bound``.
+
+    Takes the ``max`` of the per-node throughput bound and the shared aggregate
+    DRAM floor. Callers that have already rolled up per-node cycles (e.g.
+    :func:`model.build_estimate`) pass ``node_bound`` here to avoid re-walking
+    the kernels; :func:`program_breakdown` computes it and delegates.
+    """
+    agg_bw = hw.aggregate_dram_bandwidth()
+    dram_floor = total_dram_bytes(kernels, hw) / agg_bw if agg_bw > 0.0 else 0.0
+
+    if dram_floor > node_bound:
+        return dram_floor, "aggregate-dram", dram_floor, node_bound
+    return node_bound, "per-node", dram_floor, node_bound

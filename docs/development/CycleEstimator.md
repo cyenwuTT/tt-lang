@@ -40,10 +40,14 @@ T_kernel = max( Σ cyc_compute , Σ cyc_movement )
 
 - *Within a node* — the reader / compute / writer kernels run on that core's concurrent RISCs, so the node's time is the `max` of its kernels.
 - *Across nodes* — distinct nodes are separate cores in parallel, so the program time is the `max` over nodes.
+- *Aggregate DRAM ceiling* — every core draws DRAM from one shared GDDR6 controller, so the program is also bounded below by `total_dram_bytes / dram_aggregate_bw`. Only `dram`-locality movement counts (local/remote L1 never touch the controller). This is a static divide-by-peak (a real hardware ceiling), not a queuing/fairness model; it is disabled when `dram_aggregate_bw = 0`.
 
 ```
-T_program = max_node( max_{k ∈ node} T_kernel(k) )
+dram_floor = (Σ dram_bytes) / dram_aggregate_bw
+T_program  = max( max_node( max_{k ∈ node} T_kernel(k) ), dram_floor )
 ```
+
+The per-node NoC term (a single core's transfer/latency) and the aggregate DRAM floor (the shared controller) model different resources, so the program takes the `max` of both. The report records which one bound the program (`program_bound`: `per-node` | `aggregate-dram`) and the `dram_floor` value. Without the ceiling, a K-sweep matmul stays compute-bound at every K because each of N active cores is (incorrectly) given a private DRAM lane; the aggregate ceiling flips memory-heavy points to `aggregate-dram`.
 
 Under ideal-peak with full pipelining, connected producer/consumer kernels overlap in steady state, so there is no serial sum along a dependency chain. The roofline **is** the estimate, not a lower bound. The model is deterministic from (profile, trace) and needs no measured-cycle labels.
 
@@ -83,7 +87,8 @@ This is what lets the estimate be label-free and deterministic: given a profile 
 
 Compute-rate lookup is tiered: exact `(op_type, dtype)`, then op-type-only `(op_type, "")`, then `compute_rate_default`. The op-type-only tier lets rates be keyed by op alone when the trace carries no dtype.
 
-Built-in profiles live in `hardware_profile.py`, looked up by name; custom profiles load from JSON. `--hw-profile <name | path.json>` selects one.
+Built-in profiles live in `hardware_profile.py`, looked up by name;
+custom profiles load from JSON. `--hw-profile <name | path.json>` selects one.
 
 #### `wormhole_b0` provenance
 
@@ -95,6 +100,7 @@ All values are sourced from tt-metal and the Wormhole ISA docs:
 | `bytes_per_tile` | 2048 | bf16 32×32 tile (32·32·2 B) |
 | `dm_engines` | 2 | BRISC + NCRISC (METALIUM_GUIDE) |
 | `noc_bw` / `noc_latency` | 25.3 B/cyc, 293 cyc | **measured**, tt-metal `noc_latencies.yaml` (64 KB / 2589 cyc asymptote; 293-cyc small-transfer floor) |
+| `dram_aggregate_bw` | 288 B/cyc | Shared GDDR6 pool: 12 channels × 24 B/cyc = 288 GB/s @ 1 GHz. tt-metal `FlashAttention.md` ("12 channels … totaling 288 GB/s"), `Saturating_DRAM_bandwidth.md` ("DRAM spec speed 288 GB/s @12Gbps"; ~92% achievable). Spec peak (ideal-peak); contention-affected 239–267 GB/s figures are deferred. |
 | matmul rate | 1/64 (HiFi4) | `16 × fidelity` cyc per 32³ tile-MAC (LoFi 16 / HiFi2 32 / HiFi3 48 / HiFi4 64), from `GEMM_FLOPS` + ISA `MatrixUnit.md`. tt-lang sets no fidelity → inherits tt-metal's `ComputeConfig` default **HiFi4** (`kernel_types.hpp`) |
 | SFPU default | 1/32 | 32 elem/clk ideal 1-instruction floor (SFPU spec) |
 
@@ -148,15 +154,21 @@ Example summary tail:
 ```
 Type         Nodes    Avg Cycles           Max   Max node
 ..............................................................................
-compute          0          0.00          0.00   -
-memory          32       4934.36       4934.36   node0
+compute         48        54.61K        61.44K   node0
+memory           0          0.00          0.00   -
 ------------------------------------------------------------------------------
-Program cycles : 4934.36
-Active nodes   : 32 / 64  (32 idle)
-Bottleneck     : 32 nodes @ 4934.36 (memory-bound)
+DRAM (shared)
+..............................................................................
+  traffic        :  50.3 MB
+  bandwidth      :  288 B/cyc   (288 GB/s @ 1.0 GHz)
+  floor          :  174.76K
+------------------------------------------------------------------------------
+Program cycles :  174.76K   (aggregate-dram)
+Per-node max   :  61.44K    (compute)
+Active nodes   :  48 / 56   (8 idle)
 ```
 
-`Nodes` counts nodes *bound* by that resource; a node is memory-bound when its movement path exceeds its compute path.
+`Nodes` counts nodes *bound* by that resource; a node is memory-bound when its movement path exceeds its compute path. `Per-node max` is the slowest node's cycles and its bound reason; `Program cycles` shows the final program time and which resource set it (`per-node` or `aggregate-dram`). The `DRAM (shared)` block renders only when the profile models an aggregate DRAM ceiling (`dram_aggregate_bw > 0`); profiles without one omit it entirely.
 
 ---
 

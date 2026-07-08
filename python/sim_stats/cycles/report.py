@@ -72,18 +72,33 @@ def _header(estimate: CycleEstimate, unit: str, label_w: int, width: int) -> Non
     print("." * width)
 
 
-def _bottleneck(active: dict[str, tuple[float, float, float, str]]) -> str:
-    """Node(s) setting program time. Ties (common under ideal-peak) are reported
-    as a count + resource, not a single arbitrary node."""
+def _kv(label: str, value: str, note: str) -> str:
+    """A summary line: left label, value column, parenthetical note."""
+    return f"{label:<15}:  {value:<10}({note})"
+
+
+def _human_bytes(n: float) -> str:
+    """Bytes as a compact decimal magnitude with a 1-decimal unit (e.g. 50.3 MB)."""
+    for unit, divisor in (("B", 1.0), ("KB", 1e3), ("MB", 1e6), ("GB", 1e9)):
+        if abs(n) / divisor < 1000.0:
+            return f"{n:.0f} {unit}" if unit == "B" else f"{n / divisor:.1f} {unit}"
+    return f"{n / 1e9:.1f} GB"
+
+
+def _per_node_max(
+    active: dict[str, tuple[float, float, float, str]],
+) -> tuple[float, str]:
+    """The slowest node's cycles and its bound reason (compute/memory).
+
+    This is schedule's per-node bound; ties break by node order for a stable
+    reason. Empty (no active nodes) -> (0.0, "-").
+    """
     if not active:
-        return "none (no active nodes)"
+        return 0.0, "-"
     max_cy = max(v[2] for v in active.values())
-    at_max = [(n, v[3]) for n, v in active.items() if v[2] == max_cy]
-    bounds = sorted({b for _, b in at_max})
-    bound_str = bounds[0] if len(bounds) == 1 else "/".join(bounds)
-    if len(at_max) == 1:
-        return f"{at_max[0][0]} @ {abbrev_count(max_cy)} ({bound_str}-bound)"
-    return f"{len(at_max)} nodes @ {abbrev_count(max_cy)} ({bound_str}-bound)"
+    at_max = (n for n, v in active.items() if v[2] == max_cy)
+    slowest = sorted(at_max, key=node_sort_key)
+    return max_cy, active[slowest[0]][3]
 
 
 def _stats_footer(
@@ -91,7 +106,7 @@ def _stats_footer(
     width: int,
     rollup: dict[str, tuple[float, float, float, str]] | None = None,
 ) -> None:
-    """Bound summary table + program/active/bottleneck stats. Shared by both views.
+    """Bound summary table, optional DRAM block, and program/per-node stats.
 
     ``rollup`` may be passed by a caller that already computed it (the summary view)
     to avoid recomputing; the detailed view lets it default.
@@ -116,22 +131,36 @@ def _stats_footer(
             max_node = sorted((n for n, cy in rows if cy == max_cy), key=node_sort_key)[
                 0
             ]
+            avg_s, max_s = abbrev_count(avg), abbrev_count(max_cy)
         else:
-            avg = max_cy = 0.0
-            max_node = "-"
+            # Empty bound: dashes rather than 0.00, matching the "Max node" column.
+            avg_s = max_s = max_node = "-"
+        print(f"{bound:<10}{count:>8}{avg_s:>14}{max_s:>14}   {max_node}")
+
+    # DRAM (shared) block — only when the profile models an aggregate ceiling.
+    agg_bw = float(estimate.profile.get("dram_aggregate_bw", 0.0))
+    if agg_bw > 0.0:
+        clock = float(estimate.profile.get("clock_ghz", 1.0))
+        gbps = agg_bw * clock
+        print("-" * width)
+        print("DRAM (shared)")
+        print("." * width)
+        print(f"  {'traffic':<15}:  {_human_bytes(estimate.total_dram_bytes)}")
         print(
-            f"{bound:<10}{count:>8}{abbrev_count(avg):>14}"
-            f"{abbrev_count(max_cy):>14}   {max_node}"
+            f"  {'bandwidth':<15}:  {agg_bw:g} B/cyc   "
+            f"({gbps:g} GB/s @ {clock:.1f} GHz)"
         )
+        print(f"  {'floor':<15}:  {abbrev_count(estimate.dram_floor)}")
 
     # Summary — its own section.
     idle = estimate.total_nodes - estimate.active_nodes
+    node_max, node_reason = _per_node_max(active)
+    nodes = f"{estimate.active_nodes} / {estimate.total_nodes}"
     print("-" * width)
-    print(f"Program cycles : {abbrev_count(estimate.program_cycles)}")
-    print(
-        f"Active nodes   : {estimate.active_nodes} / {estimate.total_nodes}  ({idle} idle)"
-    )
-    print(f"Bottleneck     : {_bottleneck(active)}")
+    prog = abbrev_count(estimate.program_cycles)
+    print(_kv("Program cycles", prog, estimate.program_bound))
+    print(_kv("Per-node max", abbrev_count(node_max), node_reason))
+    print(_kv("Active nodes", nodes, f"{idle} idle"))
     print("=" * width)
     if sum(k.compute_cycles for k in estimate.kernels) == 0.0:
         print(
@@ -186,6 +215,9 @@ def write_json(path: Path, estimate: CycleEstimate) -> None:
         "model": "ideal-peak",
         "profile": estimate.profile,
         "program_cycles": estimate.program_cycles,
+        "program_bound": estimate.program_bound,
+        "dram_floor": estimate.dram_floor,
+        "total_dram_bytes": estimate.total_dram_bytes,
         "total_nodes": estimate.total_nodes,
         "active_nodes": estimate.active_nodes,
         "kernels": [asdict(k) for k in estimate.kernels],
@@ -235,6 +267,9 @@ def load_estimate(path: Path | str) -> CycleEstimate:
             total_nodes=int(data.get("total_nodes", 0)),
             active_nodes=int(data.get("active_nodes", 0)),
             kernels=kernels,
+            program_bound=str(data.get("program_bound", "per-node")),
+            dram_floor=float(data.get("dram_floor", 0.0)),
+            total_dram_bytes=float(data.get("total_dram_bytes", 0.0)),
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise ValueError(f"malformed cycle report {p}: {exc}") from None

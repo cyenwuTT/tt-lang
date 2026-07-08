@@ -28,7 +28,9 @@ from python.sim_stats.cycles.schedule import (
     kernel_cycles,
     kernel_paths,
     op_cycles,
+    program_breakdown,
     program_cycles,
+    total_dram_bytes,
 )
 from python.sim_stats.cycles.types import (
     HardwareProfile,
@@ -242,8 +244,216 @@ def test_hand_derived_simple_kernel_value() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Compute path (consumer built against synthetic compute_op events)
+# Aggregate DRAM bandwidth ceiling (program-level roofline)
 # ---------------------------------------------------------------------------
+
+
+def _hw_with_dram_ceiling(agg_bw: float) -> HardwareProfile:
+    """Test profile with a shared aggregate-DRAM peak (bytes/cycle)."""
+    return HardwareProfile(
+        name="test-dram",
+        compute_rate={("matmul", "bf16"): 2.0},
+        compute_rate_default=1.0,
+        noc_bw={"local_l1": 8.0, "remote_l1": 4.0, "dram": 2.0},
+        noc_latency={"local_l1": 0.0, "remote_l1": 0.0, "dram": 0.0},
+        clock_ghz=1.0,
+        bytes_per_tile=2.0,
+        dram_aggregate_bw=agg_bw,
+    )
+
+
+def _read_kernel(node: str, dram_tiles: int, local_tiles: int = 0) -> KernelWork:
+    ops = [OpWork(kind="movement", op_type="copy", tiles=dram_tiles, locality="dram")]
+    if local_tiles:
+        ops.append(
+            OpWork(
+                kind="movement",
+                op_type="copy",
+                tiles=local_tiles,
+                locality="local_l1",
+            )
+        )
+    return KernelWork(kernel=f"{node}-read", ops=ops)
+
+
+def test_total_dram_bytes_counts_only_dram_locality() -> None:
+    # local_l1 / remote_l1 traffic never hits the DRAM controller.
+    hw = _hw_with_dram_ceiling(2.0)
+    kernels = [
+        _read_kernel("node0", dram_tiles=10, local_tiles=100),
+        _read_kernel("node1", dram_tiles=10, local_tiles=100),
+    ]
+    # 20 dram tiles * 2 B/tile = 40; local_l1 excluded.
+    assert total_dram_bytes(kernels, hw) == 40.0
+
+
+def test_aggregate_dram_floor_engages_across_nodes() -> None:
+    # Four parallel read nodes: per-node movement is small, but summed DRAM
+    # traffic exceeds the shared GDDR6 pool -> the program is DRAM-bound.
+    hw = _hw_with_dram_ceiling(2.0)
+    kernels = [_read_kernel(f"node{i}", dram_tiles=10) for i in range(4)]
+    # per-node movement = 10 tiles * 2 B / 2 (dram bw) = 10 cyc -> node_bound = 10.
+    # total dram bytes = 4 * 10 * 2 = 80; floor = 80 / 2 = 40 > 10.
+    prog, bound, dram_floor, node_bound = program_breakdown(kernels, hw)
+    assert node_bound == 10.0
+    assert dram_floor == 40.0
+    assert bound == "aggregate-dram"
+    assert prog == 40.0
+    assert program_cycles(kernels, hw) == 40.0
+
+    est = build_estimate(kernels, hw)
+    assert est.program_bound == "aggregate-dram"
+    assert est.program_cycles == 40.0
+    assert est.dram_floor == 40.0
+
+
+def test_tiny_workload_unaffected_by_dram_ceiling() -> None:
+    # A single small read: the shared pool is far from saturated, so the
+    # per-node bound wins and the floor is just diagnostic.
+    hw = _hw_with_dram_ceiling(100.0)
+    kernels = [_read_kernel("node0", dram_tiles=4)]
+    prog, bound, dram_floor, node_bound = program_breakdown(kernels, hw)
+    assert node_bound == 4.0  # 4 tiles * 2 B / 2 (dram bw)
+    assert dram_floor == 4 * 2 / 100.0  # 0.08
+    assert dram_floor < node_bound
+    assert bound == "per-node"
+    assert prog == 4.0
+
+
+def test_zero_aggregate_bw_is_backward_compatible() -> None:
+    # dram_aggregate_bw = 0.0 (the default) -> no ceiling, legacy behavior.
+    hw = _hw()  # no dram_aggregate_bw set -> 0.0
+    assert hw.aggregate_dram_bandwidth() == 0.0
+    kernels = [_read_kernel(f"node{i}", dram_tiles=10) for i in range(4)]
+    prog, bound, dram_floor, node_bound = program_breakdown(kernels, hw)
+    assert dram_floor == 0.0
+    assert bound == "per-node"
+    assert prog == node_bound == 10.0  # unchanged from the pre-ceiling model
+    assert build_estimate(kernels, hw).program_bound == "per-node"
+
+
+def test_ceiling_fields_round_trip_through_json(tmp_path) -> None:
+    # program_bound / dram_floor / total_dram_bytes all survive write -> load.
+    hw = _hw_with_dram_ceiling(2.0)
+    kernels = [_read_kernel(f"node{i}", dram_tiles=10) for i in range(4)]
+    estimate = build_estimate(kernels, hw)
+    assert estimate.total_dram_bytes == 80.0  # 4 * 10 tiles * 2 B/tile
+
+    p = tmp_path / "report.json"
+    write_json(p, estimate)
+    loaded = load_estimate(p)
+
+    assert loaded.program_bound == "aggregate-dram"
+    assert loaded.dram_floor == 40.0
+    assert loaded.program_cycles == 40.0
+    assert loaded.total_dram_bytes == 80.0
+
+
+def test_old_report_without_ceiling_fields_loads_with_defaults(tmp_path) -> None:
+    # A pre-ceiling report (schema had no program_bound/dram_floor/total_dram_bytes)
+    # must still load, defaulting the new fields.
+    p = tmp_path / "old_report.json"
+    p.write_text(
+        json.dumps(
+            {
+                "tool": "tt-lang-sim-cycles",
+                "program_cycles": 42.0,
+                "total_nodes": 1,
+                "active_nodes": 1,
+                "profile": {"name": "legacy"},
+                "kernels": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    loaded = load_estimate(p)
+    assert loaded.program_cycles == 42.0
+    assert loaded.program_bound == "per-node"
+    assert loaded.dram_floor == 0.0
+    assert loaded.total_dram_bytes == 0.0
+
+
+def test_dram_floor_equals_traffic_over_aggregate_bw() -> None:
+    hw = _hw_with_dram_ceiling(2.0)
+    kernels = [_read_kernel(f"node{i}", dram_tiles=10) for i in range(4)]
+    estimate = build_estimate(kernels, hw)
+    assert estimate.dram_floor == estimate.total_dram_bytes / hw.dram_aggregate_bw
+
+
+def test_dram_floor_tie_with_node_bound_stays_per_node() -> None:
+    # floor exactly == node_bound: the strict ">" means per-node wins the tie
+    # (the aggregate ceiling only takes over when it is genuinely higher).
+    hw = _hw_with_dram_ceiling(2.0)
+    kernels = [_read_kernel("node0", dram_tiles=10)]
+    # node_bound = 10*2/2 = 10; total dram = 20; floor = 20/2 = 10 == node_bound.
+    _prog, bound, dram_floor, node_bound = program_breakdown(kernels, hw)
+    assert dram_floor == node_bound == 10.0
+    assert bound == "per-node"
+
+
+def test_empty_program_is_zero_and_per_node() -> None:
+    # No kernels at all: zero cycles, no ceiling engaged, no crash.
+    hw = _hw_with_dram_ceiling(2.0)
+    prog, bound, dram_floor, node_bound = program_breakdown([], hw)
+    assert (prog, bound, dram_floor, node_bound) == (0.0, "per-node", 0.0, 0.0)
+    est = build_estimate([], hw)
+    assert est.program_cycles == 0.0
+    assert est.active_nodes == 0
+    assert est.total_dram_bytes == 0.0
+
+
+def test_summary_shows_dram_block_only_with_a_ceiling(capsys) -> None:
+    kernels = [_read_kernel(f"node{i}", dram_tiles=10) for i in range(4)]
+
+    # With a ceiling: the DRAM (shared) block renders with all three rows.
+    print_summary(build_estimate(kernels, _hw_with_dram_ceiling(2.0)))
+    out = capsys.readouterr().out
+    assert "DRAM (shared)" in out
+    assert "traffic" in out and "bandwidth" in out and "floor" in out
+    assert "B/cyc" in out and "GB/s" in out
+    assert "Per-node max" in out
+    assert "Program cycles" in out
+    # No equations leaked into the render (labeled values only).
+    dram_block = out.split("DRAM (shared)")[1].split("Program cycles")[0]
+    assert "÷" not in dram_block and "max(" not in dram_block
+
+    # Without a ceiling (bw=0): no DRAM block, legacy footer shape unchanged.
+    print_summary(build_estimate(kernels, _hw()))
+    out = capsys.readouterr().out
+    assert "DRAM (shared)" not in out
+    assert "Program cycles" in out
+
+
+def test_per_node_max_reason_matches_slowest_node() -> None:
+    # node1's compute (16 tiles / rate 2 = 8) is the slowest node -> compute.
+    hw = _hw_with_dram_ceiling(2.0)
+    kernels = [
+        _read_kernel("node0", dram_tiles=1),  # movement 1 cyc
+        KernelWork(
+            kernel="node1-compute",
+            ops=[OpWork(kind="compute", op_type="matmul", dtype="bf16", tiles=16)],
+        ),  # compute 8 cyc, dominates
+    ]
+    from python.sim_stats.cycles.report import _per_node_max, _per_node_rollup
+
+    estimate = build_estimate(kernels, hw)
+    rollup = _per_node_rollup(estimate)
+    active = {n: v for n, v in rollup.items() if v[2] > 0.0}
+    node_max, reason = _per_node_max(active)
+    assert node_max == 8.0
+    assert reason == "compute"
+
+
+def test_empty_bound_row_shows_dash_not_zero(capsys) -> None:
+    # All nodes are memory-bound -> the empty "compute" row shows "-", not 0.00.
+    hw = _hw()
+    kernels = [_read_kernel(f"node{i}", dram_tiles=4) for i in range(2)]
+    print_summary(build_estimate(kernels, hw))
+    out = capsys.readouterr().out
+
+    compute_row = next(ln for ln in out.splitlines() if ln.startswith("compute"))
+    assert "0.00" not in compute_row
+    assert compute_row.rstrip().endswith("-")  # Avg/Max/Max-node all "-"
 
 
 def test_extract_kernel_work_reads_compute_op_events() -> None:
@@ -410,7 +620,8 @@ def test_summary_rolls_up_per_node_and_reports_utilization(capsys) -> None:
     assert "Node" in out
     assert "node0" in out
     assert "1 / 2" in out
-    assert "Bottleneck" in out
+    assert "Per-node max" in out
+    assert "DRAM (shared)" not in out  # profile has no aggregate ceiling
     assert "node1" not in out  # idle node hidden by default
 
 
@@ -482,6 +693,8 @@ def test_load_profile_json_round_trip(tmp_path) -> None:
     assert hw.bandwidth_for("dram") == 2.0
     assert hw.latency_for("dram") == 1.0
     assert hw.bytes_per_tile == 2048.0
+    # JSON omits dram_aggregate_bw -> defaults to 0.0 (no aggregate ceiling).
+    assert hw.aggregate_dram_bandwidth() == 0.0
 
 
 def test_resolve_profile_accepts_builtin_name_and_json_path(tmp_path) -> None:
