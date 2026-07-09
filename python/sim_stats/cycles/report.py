@@ -60,11 +60,17 @@ def _kv(label: str, value: str, note: str) -> str:
 
 
 def _human_bytes(n: float) -> str:
-    """Bytes as a compact decimal magnitude with a 1-decimal unit (e.g. 50.3 MB)."""
-    for unit, divisor in (("B", 1.0), ("KB", 1e3), ("MB", 1e6), ("GB", 1e9)):
-        if abs(n) / divisor < 1000.0:
+    """Bytes as a compact binary magnitude (1024-based), matching tt-metal's
+    perf_summary so the two tools' MB/GB labels line up directly (e.g. 48.0 MB)."""
+    for unit, divisor in (
+        ("B", 1.0),
+        ("KB", 1024.0),
+        ("MB", 1024.0**2),
+        ("GB", 1024.0**3),
+    ):
+        if abs(n) / divisor < 1024.0:
             return f"{n:.0f} {unit}" if unit == "B" else f"{n / divisor:.1f} {unit}"
-    return f"{n / 1e9:.1f} GB"
+    return f"{n / 1024.0**3:.1f} GB"
 
 
 def _stats_footer(estimate: CycleEstimate, width: int) -> None:
@@ -105,7 +111,8 @@ def _stats_footer(estimate: CycleEstimate, width: int) -> None:
         print("-" * width)
         print("DRAM (shared)")
         print("." * width)
-        print(f"  {'traffic':<15}:  {_human_bytes(estimate.total_dram_bytes)}")
+        print(f"  {'read':<15}:  {_human_bytes(estimate.dram_read_bytes)}")
+        print(f"  {'write':<15}:  {_human_bytes(estimate.dram_write_bytes)}")
         print(
             f"  {'bandwidth':<15}:  {agg_bw:g} B/cyc   "
             f"({gbps:g} GB/s @ {clock:.1f} GHz)"
@@ -176,8 +183,11 @@ def write_json(path: Path, estimate: CycleEstimate) -> None:
         "program_bound": estimate.program_bound,
         "dram_floor": estimate.dram_floor,
         "total_dram_bytes": estimate.total_dram_bytes,
+        "dram_read_bytes": estimate.dram_read_bytes,
+        "dram_write_bytes": estimate.dram_write_bytes,
         "node_bound": estimate.node_bound,
         "node_bound_reason": estimate.node_bound_reason,
+        "node_fill_drain": estimate.node_fill_drain,
         "total_nodes": estimate.total_nodes,
         "active_nodes": estimate.active_nodes,
         "nodes": [asdict(n) for n in estimate.nodes],
@@ -233,9 +243,12 @@ def load_estimate(path: Path | str) -> CycleEstimate:
             program_bound=str(data.get("program_bound", "per-node")),
             dram_floor=float(data.get("dram_floor", 0.0)),
             total_dram_bytes=float(data.get("total_dram_bytes", 0.0)),
+            dram_read_bytes=float(data.get("dram_read_bytes", 0.0)),
+            dram_write_bytes=float(data.get("dram_write_bytes", 0.0)),
             nodes=nodes,
             node_bound=float(data.get("node_bound", 0.0)),
             node_bound_reason=str(data.get("node_bound_reason", "compute")),
+            node_fill_drain=float(data.get("node_fill_drain", 0.0)),
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise ValueError(f"malformed cycle report {p}: {exc}") from None

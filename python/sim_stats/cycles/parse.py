@@ -70,6 +70,7 @@ def extract_kernel_work(events: list[TraceEvent]) -> dict[str, KernelWork]:
                 )
         elif ev.event == "copy_end":
             # One movement op per locality with a non-zero tile count.
+            direction = str(ev.data.get("direction", ""))
             for locality in ("local_l1", "remote_l1", "dram"):
                 tiles = as_int(ev.data.get(locality, 0))
                 if tiles > 0:
@@ -79,6 +80,7 @@ def extract_kernel_work(events: list[TraceEvent]) -> dict[str, KernelWork]:
                             op_type="copy",
                             tiles=tiles,
                             locality=locality,
+                            direction=direction,
                         )
                     )
 

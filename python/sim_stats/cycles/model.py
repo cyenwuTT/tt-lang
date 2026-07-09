@@ -77,6 +77,27 @@ def total_dram_bytes(kernels: list[KernelWork], hw: HardwareProfile) -> float:
     )
 
 
+def dram_bytes_by_direction(
+    kernels: list[KernelWork], hw: HardwareProfile
+) -> tuple[float, float]:
+    """Split the DRAM-locality movement bytes into (read, write).
+
+    Direction comes from the trace's ``copy_end`` ``direction`` field. Traffic with
+    no direction (older traces) falls into read, so read + write always equals
+    :func:`total_dram_bytes`. Reporting/validation only — the ceiling is unsplit.
+    """
+    read = write = 0.0
+    for k in kernels:
+        for o in k.ops:
+            if o.kind == "movement" and o.locality == "dram":
+                b = o.tiles * hw.bytes_per_tile
+                if o.direction == "write":
+                    write += b
+                else:
+                    read += b
+    return read, write
+
+
 def kernel_cycles(work: KernelWork, hw: HardwareProfile) -> float:
     """Ideal-peak kernel cycles: the larger of the compute and movement paths.
 
@@ -170,6 +191,48 @@ def per_node_rollup(kernel_estimates: list[KernelEstimate]) -> list[NodeEstimate
     ]
 
 
+def _pipeline_items(kernels: list[KernelWork]) -> dict[str, int]:
+    """Pipeline-item count N per node: movement ops in its write-role kernel.
+
+    Each write op is one output block flowing through the pipeline. Nodes with no
+    write kernel get N=1 (no pipelining -> serial stages).
+    """
+    items: dict[str, int] = {}
+    for kw in kernels:
+        if role_from_kernel(kw.kernel) == "write":
+            n = sum(1 for o in kw.ops if o.kind == "movement")
+            node = node_from_kernel(kw.kernel)
+            items[node] = items.get(node, 0) + n
+    return items
+
+
+def per_node_fill_drain_bound(
+    kernel_estimates: list[KernelEstimate], kernels: list[KernelWork]
+) -> float:
+    """Tier-1 per-node bound including crude pipeline fill/drain.
+
+    For each node, treat its kernels as pipeline stages with cycles ``C_i`` and let
+    ``N`` be the node's pipeline-item count. The standard pipeline time is
+    ``max_i(C_i) + (sum_i C_i - max_i C_i) / N``: large N recovers the throughput
+    bound ``max_i C_i``; N=1 gives the serial sum. Returns the max over nodes.
+
+    Crude approximation (assumes a read/compute/write stage structure by role); the
+    rigorous CB-DAG fill/drain is deferred. See docs/development/CycleEstimator.md.
+    """
+    items = _pipeline_items(kernels)
+    by_node: dict[str, list[float]] = {}
+    for ke in kernel_estimates:
+        by_node.setdefault(ke.node, []).append(ke.cycles)
+
+    fd_bound = 0.0
+    for node, cyc in by_node.items():
+        stage_max = max(cyc, default=0.0)
+        n = max(1, items.get(node, 1))
+        node_time = stage_max + (sum(cyc) - stage_max) / n
+        fd_bound = max(fd_bound, node_time)
+    return fd_bound
+
+
 def build_estimate(kernels: list[KernelWork], hw: HardwareProfile) -> CycleEstimate:
     """Assemble the canonical CycleEstimate from per-kernel work + a profile."""
     kernel_estimates: list[KernelEstimate] = []
@@ -197,9 +260,15 @@ def build_estimate(kernels: list[KernelWork], hw: HardwareProfile) -> CycleEstim
     )
     node_bound_reason = at_max[0].bound if at_max else "-"
 
-    prog_cycles, program_bound, dram_floor, _node_bound = program_from_node_bound(
-        kernels, hw, node_bound
+    # Tier-1 pipeline fill/drain feeds the per-node path; dram_floor is unchanged.
+    fd_bound = per_node_fill_drain_bound(kernel_estimates, kernels)
+    node_fill_drain = fd_bound - node_bound
+
+    prog_cycles, program_bound, dram_floor, _fd = program_from_node_bound(
+        kernels, hw, fd_bound
     )
+
+    dram_read, dram_write = dram_bytes_by_direction(kernels, hw)
 
     return CycleEstimate(
         profile_name=hw.name,
@@ -210,10 +279,13 @@ def build_estimate(kernels: list[KernelWork], hw: HardwareProfile) -> CycleEstim
         kernels=kernel_estimates,
         program_bound=program_bound,
         dram_floor=dram_floor,
-        total_dram_bytes=total_dram_bytes(kernels, hw),
+        total_dram_bytes=dram_read + dram_write,
+        dram_read_bytes=dram_read,
+        dram_write_bytes=dram_write,
         nodes=nodes,
         node_bound=node_bound,
         node_bound_reason=node_bound_reason,
+        node_fill_drain=node_fill_drain,
     )
 
 

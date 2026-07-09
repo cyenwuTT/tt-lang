@@ -14,10 +14,12 @@ import pytest
 
 from python.sim_stats.cycles.model import (
     build_estimate,
+    dram_bytes_by_direction,
     kernel_cycles,
     kernel_paths,
     load_profile_json,
     op_cycles,
+    per_node_fill_drain_bound,
     per_node_rollup,
     program_breakdown,
     program_cycles,
@@ -33,6 +35,7 @@ from python.sim_stats.cycles.report import (
 )
 from python.sim_stats.cycles.types import (
     HardwareProfile,
+    KernelEstimate,
     KernelWork,
     OpWork,
     TraceEvent,
@@ -286,6 +289,91 @@ def test_total_dram_bytes_counts_only_dram_locality() -> None:
     assert total_dram_bytes(kernels, hw) == 40.0
 
 
+def test_dram_read_write_split_sums_to_total() -> None:
+    hw = _hw_with_dram_ceiling(2.0)
+    kernels = [
+        KernelWork(
+            kernel="node0-read",
+            ops=[
+                OpWork(
+                    kind="movement",
+                    op_type="copy",
+                    tiles=10,
+                    locality="dram",
+                    direction="read",
+                ),
+                OpWork(
+                    kind="movement",
+                    op_type="copy",
+                    tiles=4,
+                    locality="dram",
+                    direction="write",
+                ),
+            ],
+        )
+    ]
+    est = build_estimate(kernels, hw)
+    assert est.dram_read_bytes == 20.0  # 10 tiles * 2 B
+    assert est.dram_write_bytes == 8.0  # 4 tiles * 2 B
+    assert est.dram_read_bytes + est.dram_write_bytes == est.total_dram_bytes == 28.0
+
+
+def test_dram_direction_captured_on_op_from_trace() -> None:
+    events = [
+        TraceEvent(0, "kernel_start", "node0-read", {}),
+        TraceEvent(
+            5, "copy_end", "node0-read", {"tiles": 3, "dram": 3, "direction": "read"}
+        ),
+        TraceEvent(6, "kernel_end", "node0-read", {}),
+    ]
+    ops = extract_kernel_work(events)["node0-read"].ops
+    assert [(o.locality, o.direction) for o in ops] == [("dram", "read")]
+
+
+def test_dram_split_defaults_gracefully_without_direction() -> None:
+    # Traces with no `direction` -> everything falls into read; write = 0;
+    # sum still equals the total. (dram_bytes_by_direction and OpWork default.)
+    hw = _hw_with_dram_ceiling(2.0)
+    kernels = [_read_kernel("node0", dram_tiles=10)]  # _read_kernel sets no direction
+    assert kernels[0].ops[0].direction == ""
+    read, write = dram_bytes_by_direction(kernels, hw)
+    assert (read, write) == (20.0, 0.0)
+    est = build_estimate(kernels, hw)
+    assert est.dram_write_bytes == 0.0
+    assert est.dram_read_bytes == est.total_dram_bytes == 20.0
+
+
+def test_dram_split_round_trips_through_json(tmp_path) -> None:
+    hw = _hw_with_dram_ceiling(2.0)
+    kernels = [
+        KernelWork(
+            kernel="node0-read",
+            ops=[
+                OpWork(
+                    kind="movement",
+                    op_type="copy",
+                    tiles=10,
+                    locality="dram",
+                    direction="read",
+                ),
+                OpWork(
+                    kind="movement",
+                    op_type="copy",
+                    tiles=4,
+                    locality="dram",
+                    direction="write",
+                ),
+            ],
+        )
+    ]
+    estimate = build_estimate(kernels, hw)
+    p = tmp_path / "report.json"
+    write_json(p, estimate)
+    loaded = load_estimate(p)
+    assert loaded.dram_read_bytes == 20.0
+    assert loaded.dram_write_bytes == 8.0
+
+
 def test_aggregate_dram_floor_engages_across_nodes() -> None:
     # Four parallel read nodes: per-node movement is small, but summed DRAM
     # traffic exceeds the shared GDDR6 pool -> the program is DRAM-bound.
@@ -404,11 +492,12 @@ def test_empty_program_is_zero_and_per_node() -> None:
 def test_summary_shows_dram_block_only_with_a_ceiling(capsys) -> None:
     kernels = [_read_kernel(f"node{i}", dram_tiles=10) for i in range(4)]
 
-    # With a ceiling: the DRAM (shared) block renders with all three rows.
+    # With a ceiling: the DRAM (shared) block renders read/write + bandwidth + floor
+    # (read/write mirror tt-metal perf_summary; total is implicit).
     print_summary(build_estimate(kernels, _hw_with_dram_ceiling(2.0)))
     out = capsys.readouterr().out
     assert "DRAM (shared)" in out
-    assert "traffic" in out and "bandwidth" in out and "floor" in out
+    assert "read" in out and "write" in out and "bandwidth" in out and "floor" in out
     assert "B/cyc" in out and "GB/s" in out
     assert "Per-node max" in out
     assert "Program cycles" in out
@@ -458,6 +547,116 @@ def test_per_node_rollup_maxes_over_a_nodes_kernels() -> None:
         5.0,
         "compute",
     )
+
+
+# ---------------------------------------------------------------------------
+# Tier-1 pipeline fill/drain
+# ---------------------------------------------------------------------------
+
+
+def _ke(kernel: str, cycles: float) -> KernelEstimate:
+    """A KernelEstimate stub with only the fields fill/drain reads."""
+    return KernelEstimate(
+        kernel=kernel,
+        node="node0",
+        role="",
+        compute_cycles=0.0,
+        movement_cycles=0.0,
+        cycles=cycles,
+        bound="compute-bound",
+    )
+
+
+def _write_kernel(node: str, items: int) -> KernelWork:
+    """A write-role kernel with `items` movement ops (the pipeline-item count N)."""
+    return KernelWork(
+        kernel=f"{node}-write",
+        ops=[OpWork(kind="movement", op_type="copy", tiles=1) for _ in range(items)],
+    )
+
+
+def test_fill_drain_large_n_recovers_node_bound() -> None:
+    # Stages 4/10/2 -> max=10, sum=16. With large N the correction (sum-max)/N
+    # -> 0, so the per-node bound recovers the throughput max (10).
+    ke = [_ke("node0-read", 4.0), _ke("node0-compute", 10.0), _ke("node0-write", 2.0)]
+    fd = per_node_fill_drain_bound(ke, [_write_kernel("node0", items=100_000)])
+    assert fd == pytest.approx(10.0, abs=1e-3)
+
+
+def test_fill_drain_small_n_adds_serial_correction() -> None:
+    # N=1 -> no pipelining -> node_time = sum of stages (serial).
+    ke = [_ke("node0-read", 4.0), _ke("node0-compute", 10.0), _ke("node0-write", 2.0)]
+    fd = per_node_fill_drain_bound(ke, [_write_kernel("node0", items=1)])
+    assert fd == 16.0  # 10 + (16 - 10) / 1
+
+    # No write kernel -> N defaults to 1 (serial), same result.
+    assert per_node_fill_drain_bound(ke, []) == 16.0
+
+
+def test_fill_drain_moderate_n_matches_formula() -> None:
+    # N=4: 10 + (16 - 10)/4 = 11.5.
+    ke = [_ke("node0-read", 4.0), _ke("node0-compute", 10.0), _ke("node0-write", 2.0)]
+    fd = per_node_fill_drain_bound(ke, [_write_kernel("node0", items=4)])
+    assert fd == pytest.approx(11.5)
+
+
+def test_fill_drain_does_not_change_dram_bound_program() -> None:
+    # Per-node fill/drain is real but non-binding when the aggregate DRAM floor
+    # dominates: program stays == dram_floor, aggregate-dram.
+    hw = _hw_with_dram_ceiling(2.0)
+    kernels = []
+    for i in range(4):
+        node = f"node{i}"
+        kernels += [
+            KernelWork(
+                kernel=f"{node}-read",
+                ops=[
+                    OpWork(kind="movement", op_type="copy", tiles=100, locality="dram")
+                ],
+            ),  # 100*2/2 = 100 cyc, 200 B dram
+            KernelWork(
+                kernel=f"{node}-compute",
+                ops=[OpWork(kind="compute", op_type="matmul", dtype="bf16", tiles=2)],
+            ),  # 2/2 = 1 cyc
+            KernelWork(
+                kernel=f"{node}-write",
+                ops=[
+                    OpWork(
+                        kind="movement", op_type="copy", tiles=2, locality="local_l1"
+                    )
+                ],
+            ),  # 2*2/8 = 0.5 cyc, N=1
+        ]
+    est = build_estimate(kernels, hw)
+    # Per-node: stages 100/1/0.5, N=1 -> node_time 101.5; node_bound 100 -> fd = 1.5.
+    assert est.node_bound == 100.0
+    assert est.node_fill_drain == 1.5
+    # DRAM: 4 * 100 tiles * 2 B = 800 B; floor = 800 / 2 = 400 > 101.5.
+    assert est.dram_floor == 400.0
+    assert est.program_bound == "aggregate-dram"
+    assert est.program_cycles == 400.0  # unchanged by fill/drain
+
+
+def test_node_fill_drain_round_trips_through_json(tmp_path) -> None:
+    hw = _hw()
+    kernels = [
+        KernelWork(
+            kernel="node0-read",
+            ops=[OpWork(kind="movement", op_type="copy", tiles=4, locality="dram")],
+        ),
+        KernelWork(
+            kernel="node0-compute",
+            ops=[OpWork(kind="compute", op_type="matmul", dtype="bf16", tiles=20)],
+        ),
+        KernelWork(
+            kernel="node0-write",
+            ops=[OpWork(kind="movement", op_type="copy", tiles=2, locality="dram")],
+        ),
+    ]
+    estimate = build_estimate(kernels, hw)
+    p = tmp_path / "report.json"
+    write_json(p, estimate)
+    assert load_estimate(p).node_fill_drain == estimate.node_fill_drain
 
 
 def test_empty_bound_row_shows_dash_not_zero(capsys) -> None:

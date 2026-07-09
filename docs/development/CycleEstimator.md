@@ -51,8 +51,18 @@ The per-node NoC term (a single core's transfer/latency) and the aggregate DRAM 
 
 Under ideal-peak with full pipelining, connected producer/consumer kernels overlap in steady state, so there is no serial sum along a dependency chain. The roofline **is** the estimate, not a lower bound. The model is deterministic from (profile, trace) and needs no measured-cycle labels.
 
-**Out of scope — the latency regime.**
-Fill/drain latency for small workloads and explicit cross-node serialization are not modelled. They would require the dependency DAG (`kernel_block.on`, dfb push/pop, pipe send/recv); the current model is throughput-only.
+**Tier-1 pipeline fill/drain (crude).**
+Pure throughput ignores the fill (first item traversing read→compute→write) and drain (last item) of a pipeline. A crude, deterministic correction treats each node's kernels as pipeline stages with cycles `C_i`, and `N` = pipeline items = the movement-op count of that node's write-role kernel (one per output block; `N≥1`, defaulting to 1 with no write kernel):
+
+```
+node_time    = max_i(C_i) + (Σ_i C_i - max_i C_i) / N
+T_program    = max( max_node(node_time), dram_floor )
+```
+
+Large `N` → correction → 0 (recovers the throughput bound `max_i C_i`); `N=1` → serial sum. Only the per-node path gains fill/drain; `dram_floor` is untouched, so a DRAM-bound program is unchanged. The extra cycles are reported as `Fill/drain` (`node_fill_drain` = `max_node(node_time) − node_bound`). This is a **crude Tier-1 approximation**: it assumes a read/compute/write stage structure by role and a single item count per node.
+
+**Out of scope — the rigorous latency regime.**
+Exact fill/drain and explicit cross-node serialization from the real dependency DAG (`kernel_block.on`, dfb push/pop, pipe send/recv) are deferred; Tier-1 above is the throughput model plus a coarse per-node correction, not a DAG traversal.
 
 ---
 
@@ -240,6 +250,6 @@ Accuracy against profiled device cycles (`tt-metal` `ReadDeviceProfilerResults`,
 - **Compute rates are partial** — the SFPU default is the ideal 1-instruction floor (32 elem/clk); real SFPU ops cost more, scaling with instruction count (kernel-dependent → profiling), and the SFPU unpack/pack-BW limit is not modelled. The matmul (FPU) rate is still a placeholder pending its cycles/tile spec.
 - **dtype-blind** — `dtype` is not emitted, so compute rates key on `op_type` alone, and movement uses a fixed `bytes_per_tile` (bf16) regardless of tensor dtype.
 - **`broadcast` / `transpose` are not charged** as compute.
-- **Latency regime** (fill/drain, cross-node serialization) is outside the current throughput-bound model; it needs the dependency DAG.
+- **Latency regime** — a crude Tier-1 fill/drain correction is included (see the model section); the rigorous version (exact fill/drain, cross-node serialization) still needs the dependency DAG.
 - **Behavioral-coverage and sensitivity sweeps**, and per-family / per-size reporting, are not yet built out.
 - **Unified `sim_stats` entry (open — needs discussion)** — a `python -m sim_stats stats|cycles` subcommand dispatcher instead of two separate entries; restructures the stats tool, so its own change.

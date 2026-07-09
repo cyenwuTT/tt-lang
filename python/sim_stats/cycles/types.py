@@ -87,6 +87,7 @@ class OpWork:
     dtype: str = ""  # e.g. "bf16", "fp32" (compute ops)
     tiles: int = 0  # work in tiles (compute tiles, or tiles moved)
     locality: str = ""  # "local_l1" | "remote_l1" | "dram" (movement ops)
+    direction: str = ""  # "read" | "write" (movement ops)
 
 
 @dataclass
@@ -139,9 +140,12 @@ class CycleEstimate:
     program_bound: str = "per-node"  # "per-node" | "aggregate-dram"
     dram_floor: float = 0.0
     total_dram_bytes: float = 0.0
+    dram_read_bytes: float = 0.0
+    dram_write_bytes: float = 0.0
     nodes: list[NodeEstimate] = field(default_factory=list[NodeEstimate])
-    node_bound: float = 0.0  # max over nodes of per-node cycles
+    node_bound: float = 0.0  # max over nodes of per-node cycles (throughput)
     node_bound_reason: str = "compute"  # bound of the slowest node ("compute"|"memory")
+    node_fill_drain: float = 0.0  # Tier-1 fill/drain on the per-node path
 
 
 # ---------------------------------------------------------------------------
