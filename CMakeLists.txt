@@ -261,6 +261,7 @@ install(DIRECTORY python/pykernel DESTINATION python_packages/ttl
         PATTERN "__pycache__" EXCLUDE)
 install(DIRECTORY python/sim_stats DESTINATION python_packages
         FILES_MATCHING PATTERN "*.py"
+        PATTERN "*.json"  # bundled hardware profiles (sim_stats/cycles/hw_profiles/)
         PATTERN "__pycache__" EXCLUDE)
 
 # Install tt-lang-sim script to bin directory

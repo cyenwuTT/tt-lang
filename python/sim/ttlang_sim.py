@@ -249,14 +249,13 @@ def _print_cycle_estimate(
         from sim_stats.cycles.model import build_estimate, resolve_profile
         from sim_stats.cycles.parse import extract_kernel_work
         from sim_stats.cycles.report import print_summary, write_json
-        from sim_stats.cycles.types import DEFAULT
         from sim_stats.cycles.types import TraceEvent as EstimatorTraceEvent
     except ImportError as exc:
         print(f"--cycles: cycle estimator unavailable ({exc})", file=sys.stderr)
         return
 
     try:
-        hw = resolve_profile(hw_profile) if hw_profile else DEFAULT
+        hw = resolve_profile(hw_profile)
     except (KeyError, FileNotFoundError, ValueError) as exc:
         print(f"--cycles: {exc}", file=sys.stderr)
         return

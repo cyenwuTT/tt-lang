@@ -19,30 +19,25 @@ class TraceEvent:
 
 @dataclass(frozen=True)
 class HardwareProfile:
-    """Static hardware spec: the rates the trace can't provide (how fast the part runs).
+    """Static hardware spec: the rates a trace can't provide.
 
-    Built-in profile instances (``WORMHOLE_B0``, ``DEFAULT``) are defined at the
-    bottom of this module (data only). Name/path resolution and JSON loading live
-    in :mod:`model` (``resolve_profile`` / ``load_profile_json`` / ``get_profile``).
+    Field meanings + provenance: docs/development/CycleEstimator.md. Profile *data*
+    is JSON under ``hw_profiles/``, loaded by :mod:`model`
+    (``resolve_profile`` / ``load_profile_json``).
     """
 
     name: str
-    compute_rate: dict[tuple[str, str], float]  # tiles/cycle by (op_type, dtype)
-    compute_rate_default: float  # fallback tiles/cycle
-    noc_bw: dict[str, float]  # bytes/cycle by locality (local_l1/remote_l1/dram)
-    noc_latency: dict[str, float]  # fixed cycles per transfer, by locality
-    clock_ghz: float  # cycle<->ns reporting only, not used in the model
-    bytes_per_tile: float  # movement tile size (provisional; bf16 = 2048 B)
-    dm_engines: int = 1  # reserved for future overlap modelling
-    dram_aggregate_bw: float = 0.0  # shared DRAM peak, bytes/cycle (0 = off)
+    compute_rate: dict[tuple[str, str], float]
+    compute_rate_default: float
+    noc_bw: dict[str, float]
+    noc_latency: dict[str, float]
+    clock_ghz: float  # load-bearing: also converts dram_aggregate_gbps -> B/cyc at load
+    bytes_per_tile: float
+    dm_engines: int = 1
+    dram_aggregate_bw: float = 0.0  # B/cyc; JSON stores gbps, converted ÷clock at load
 
     def rate_for(self, op_type: str, dtype: str = "") -> float:
-        """Peak tiles/cycle for an op.
-
-        Tiered lookup: exact ``(op_type, dtype)``, then an op-type-only entry
-        ``(op_type, "")``, then ``compute_rate_default``. The op-type-only tier
-        lets rates be keyed by op_type alone when the trace carries no dtype.
-        """
+        """Peak tiles/cycle: exact ``(op_type, dtype)`` → ``(op_type, "")`` → default."""
         for key in ((op_type, dtype), (op_type, "")):
             if key in self.compute_rate:
                 return self.compute_rate[key]
@@ -55,15 +50,6 @@ class HardwareProfile:
     def latency_for(self, locality: str) -> float:
         """Fixed per-transfer latency in cycles for a locality, or 0.0 if unknown."""
         return self.noc_latency.get(locality, 0.0)
-
-    def aggregate_dram_bandwidth(self) -> float:
-        """Program-wide shared DRAM peak in bytes/cycle, or 0.0 if unmodeled.
-
-        Unlike ``noc_bw["dram"]`` (a per-core NoC lane), this is the single
-        GDDR6 controller pool shared by all cores. 0.0 means no program-level
-        ceiling (legacy behavior).
-        """
-        return self.dram_aggregate_bw
 
     def summary(self) -> dict[str, Any]:
         """Serializable snapshot embedded in a report for reproducibility."""
@@ -145,31 +131,8 @@ class CycleEstimate:
     nodes: list[NodeEstimate] = field(default_factory=list[NodeEstimate])
     node_bound: float = 0.0  # max over nodes of per-node cycles (throughput)
     node_bound_reason: str = "compute"  # bound of the slowest node ("compute"|"memory")
-    node_fill_drain: float = 0.0  # Tier-1 fill/drain on the per-node path
+    node_fill_drain: float = 0.0  # crude fill/drain on the per-node path
 
 
-# ---------------------------------------------------------------------------
-# Built-in hardware profiles
-# ---------------------------------------------------------------------------
-
-# Wormhole B0 (80 Tensix cores). Value sources + caveats: see the "wormhole_b0
-# provenance" table in docs/development/CycleEstimator.md.
-# Tile units differ per family: matmul = MAC volume (M*K*N), eltwise/unary/reduce
-# = output tiles.
-WORMHOLE_B0 = HardwareProfile(
-    name="wormhole_b0",
-    compute_rate={("matmul", ""): 1.0 / 64},  # tiles/cycle; HiFi4 (tt-lang default)
-    compute_rate_default=1.0 / 32,  # tiles/cycle (SFPU)
-    noc_bw={"local_l1": 25.3, "remote_l1": 25.3, "dram": 25.3},  # bytes/cycle
-    noc_latency={"local_l1": 293.0, "remote_l1": 293.0, "dram": 293.0},  # cycles
-    clock_ghz=1.0,  # GHz
-    bytes_per_tile=2048.0,  # bytes (bf16)
-    dm_engines=2,  # engines
-    dram_aggregate_bw=288.0,  # bytes/cycle (shared GDDR6 pool); see provenance table
-)
-
-_PROFILES: dict[str, HardwareProfile] = {
-    WORMHOLE_B0.name: WORMHOLE_B0,
-}
-
-DEFAULT = WORMHOLE_B0
+# Profile *data* is JSON under hw_profiles/, loaded by :mod:`model`
+# (resolve_profile / load_profile_json). This module holds only the schema.

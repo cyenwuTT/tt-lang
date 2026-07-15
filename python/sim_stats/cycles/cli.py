@@ -12,7 +12,7 @@ from pathlib import Path
 from .model import build_estimate, resolve_profile
 from .parse import build_pipeline
 from .report import load_estimate, print_detailed, print_summary, write_json
-from .types import DEFAULT, CycleEstimate
+from .types import CycleEstimate
 
 
 def main() -> None:
@@ -46,10 +46,10 @@ def main() -> None:
     parser.add_argument(
         "-p",
         "--hw-profile",
-        default=DEFAULT.name,
+        default=None,
         help=(
             "Hardware profile: a built-in name or a path to a .json profile file "
-            "(default: %(default)s)"
+            "(default: wormhole_b0)"
         ),
     )
     parser.add_argument(

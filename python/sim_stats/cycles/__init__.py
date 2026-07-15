@@ -13,7 +13,6 @@ from .report import (
     write_json,
 )
 from .types import (
-    DEFAULT,
     CycleEstimate,
     HardwareProfile,
     KernelEstimate,
@@ -31,7 +30,6 @@ __all__ = [
     "KernelEstimate",
     "NodeEstimate",
     "CycleEstimate",
-    "DEFAULT",
     "parse_trace",
     "extract_kernel_work",
     "build_estimate",

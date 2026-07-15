@@ -410,7 +410,7 @@ def test_tiny_workload_unaffected_by_dram_ceiling() -> None:
 def test_zero_aggregate_bw_is_backward_compatible() -> None:
     # dram_aggregate_bw = 0.0 (the default) -> no ceiling, legacy behavior.
     hw = _hw()  # no dram_aggregate_bw set -> 0.0
-    assert hw.aggregate_dram_bandwidth() == 0.0
+    assert hw.dram_aggregate_bw == 0.0
     kernels = [_read_kernel(f"node{i}", dram_tiles=10) for i in range(4)]
     prog, bound, dram_floor, node_bound = program_breakdown(kernels, hw)
     assert dram_floor == 0.0
@@ -908,8 +908,8 @@ def test_load_profile_json_round_trip(tmp_path) -> None:
     assert hw.bandwidth_for("dram") == 2.0
     assert hw.latency_for("dram") == 1.0
     assert hw.bytes_per_tile == 2048.0
-    # JSON omits dram_aggregate_bw -> defaults to 0.0 (no aggregate ceiling).
-    assert hw.aggregate_dram_bandwidth() == 0.0
+    # JSON omits dram_aggregate_gbps -> defaults to 0.0 (no aggregate ceiling).
+    assert hw.dram_aggregate_bw == 0.0
 
 
 def test_resolve_profile_accepts_builtin_name_and_json_path(tmp_path) -> None:
@@ -925,8 +925,21 @@ def test_load_profile_json_missing_file_raises(tmp_path) -> None:
         load_profile_json(tmp_path / "nope.json")
 
 
+def test_load_profile_json_all_fields_optional(tmp_path) -> None:
+    # Every field is optional: an empty profile loads with sane defaults.
+    p = tmp_path / "min.json"
+    p.write_text('{"name": "min"}', encoding="utf-8")
+    hw = load_profile_json(p)
+    assert hw.clock_ghz == 1.0
+    assert hw.bytes_per_tile == 2048.0
+    assert hw.compute_rate_default == 1.0
+    assert hw.noc_bw == {}  # no noc_bw -> movement is free (report flags it)
+
+
 def test_load_profile_json_malformed_raises(tmp_path) -> None:
-    p = tmp_path / "bad.json"
-    p.write_text('{"name": "bad"}', encoding="utf-8")  # missing required keys
-    with pytest.raises(ValueError):
-        load_profile_json(p)
+    # Bad *values* still fail: non-numeric field, non-positive clock, wrong type.
+    for bad in ('{"clock_ghz": "fast"}', '{"bytes_per_tile": 0}', '{"noc_bw": "x"}'):
+        p = tmp_path / "bad.json"
+        p.write_text(bad, encoding="utf-8")
+        with pytest.raises(ValueError):
+            load_profile_json(p)

@@ -46,6 +46,10 @@ def _header(estimate: CycleEstimate, unit: str, label_w: int, width: int) -> Non
     print("\n" + "=" * width)
     print("Cycle Estimate — ideal-peak model")
     print(f"hw-profile: {estimate.profile_name}")
+    if not estimate.profile.get("noc_bw"):
+        print(
+            "WARNING: profile has no noc_bw — movement modeled as free (latency only)"
+        )
     print("=" * width)  # title block / tables separator
     print(
         f"{unit:<{label_w}} {'Compute':>{_NUM_W}} "

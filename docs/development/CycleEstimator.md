@@ -51,18 +51,18 @@ The per-node NoC term (a single core's transfer/latency) and the aggregate DRAM 
 
 Under ideal-peak with full pipelining, connected producer/consumer kernels overlap in steady state, so there is no serial sum along a dependency chain. The roofline **is** the estimate, not a lower bound. The model is deterministic from (profile, trace) and needs no measured-cycle labels.
 
-**Tier-1 pipeline fill/drain (crude).**
-Pure throughput ignores the fill (first item traversing read→compute→write) and drain (last item) of a pipeline. A crude, deterministic correction treats each node's kernels as pipeline stages with cycles `C_i`, and `N` = pipeline items = the movement-op count of that node's write-role kernel (one per output block; `N≥1`, defaulting to 1 with no write kernel):
+**Crude fill/drain correction.**
+Pure throughput ignores a pipeline's fill (first item through read→compute→write) and drain (last item). A deterministic correction treats a node's kernels as stages with cycles `C_i` and `N` pipeline items (the write kernel's movement-op count; `N ≥ 1`):
 
 ```
 node_time    = max_i(C_i) + (Σ_i C_i - max_i C_i) / N
 T_program    = max( max_node(node_time), dram_floor )
 ```
 
-Large `N` → correction → 0 (recovers the throughput bound `max_i C_i`); `N=1` → serial sum. Only the per-node path gains fill/drain; `dram_floor` is untouched, so a DRAM-bound program is unchanged. The extra cycles are reported as `Fill/drain` (`node_fill_drain` = `max_node(node_time) − node_bound`). This is a **crude Tier-1 approximation**: it assumes a read/compute/write stage structure by role and a single item count per node.
+Large `N` recovers pure throughput (`max_i C_i`); `N = 1` gives a serial sum. Only the per-node path is affected — `dram_floor` is untouched, so a DRAM-bound program is unchanged. Reported as `Fill/drain` (`node_fill_drain`). It's **crude**: it assumes a read/compute/write stage shape and one item-count per node.
 
 **Out of scope — the rigorous latency regime.**
-Exact fill/drain and explicit cross-node serialization from the real dependency DAG (`kernel_block.on`, dfb push/pop, pipe send/recv) are deferred; Tier-1 above is the throughput model plus a coarse per-node correction, not a DAG traversal.
+Exact fill/drain and cross-node serialization from the real dependency DAG (`kernel_block.on`, dfb push/pop, pipe send/recv) are deferred; the correction above is a coarse per-node add-on, not a DAG traversal.
 
 ---
 
@@ -92,13 +92,12 @@ This is what lets the estimate be label-free and deterministic: given a profile 
 | `noc_bw` | bytes/cycle by locality (`local_l1` / `remote_l1` / `dram`) |
 | `noc_latency` | fixed cycles per transfer, by locality |
 | `bytes_per_tile` | movement tile size (provisional; bf16 = 2048 B) |
-| `clock_ghz` | cycle↔ns reporting only; not used in the model |
+| `clock_ghz` | GHz; ns reporting **and** the DRAM GB/s→B/cyc conversion at load |
 | `dm_engines` | reserved for future overlap modelling |
 
 Compute-rate lookup is tiered: exact `(op_type, dtype)`, then op-type-only `(op_type, "")`, then `compute_rate_default`. The op-type-only tier lets rates be keyed by op alone when the trace carries no dtype.
 
-Built-in profile data lives in `types.py` (looked up by name); resolution and
-JSON loading live in `model.py`. `--hw-profile <name | path.json>` selects one.
+Built-in profiles are JSON files under `hw_profiles/` (one per part); `model.py` loads and resolves them (`types.py` holds only the dataclass schema). `--hw-profile <name | path.json>` selects one — a bundled name, or a path to a custom profile anywhere.
 
 #### `wormhole_b0` provenance
 
@@ -110,7 +109,7 @@ All values are sourced from tt-metal and the Wormhole ISA docs:
 | `bytes_per_tile` | 2048 | bf16 32×32 tile (32·32·2 B) |
 | `dm_engines` | 2 | BRISC + NCRISC (METALIUM_GUIDE) |
 | `noc_bw` / `noc_latency` | 25.3 B/cyc, 293 cyc | **measured**, tt-metal `noc_latencies.yaml` (64 KB / 2589 cyc asymptote; 293-cyc small-transfer floor) |
-| `dram_aggregate_bw` | 288 B/cyc | Shared GDDR6 pool: 12 channels × 24 B/cyc = 288 GB/s @ 1 GHz. tt-metal `FlashAttention.md` ("12 channels … totaling 288 GB/s"), `Saturating_DRAM_bandwidth.md` ("DRAM spec speed 288 GB/s @12Gbps"; ~92% achievable). Spec peak (ideal-peak); contention-affected 239–267 GB/s figures are deferred. |
+| `dram_aggregate_gbps` | 288 GB/s | 12 GDDR6 ch × 24 B/cyc @ 12 Gbps (tt-metal `Saturating_DRAM_bandwidth.md`). Stored as GB/s in the JSON; converted to B/cyc at load (÷ `clock_ghz`). It is the **spec upper bound** — a lower-bound model needs an *upper bound* on achievable BW, so the datasheet peak is used, not a measured figure (sustained is ~265, 92% of spec). |
 | matmul rate | 1/64 (HiFi4) | `16 × fidelity` cyc per 32³ tile-MAC (LoFi 16 / HiFi2 32 / HiFi3 48 / HiFi4 64), from `GEMM_FLOPS` + ISA `MatrixUnit.md`. tt-lang sets no fidelity → inherits tt-metal's `ComputeConfig` default **HiFi4** (`kernel_types.hpp`) |
 | SFPU default | 1/32 | 32 elem/clk ideal 1-instruction floor (SFPU spec) |
 
@@ -169,7 +168,8 @@ memory           0          0.00          0.00   -
 ------------------------------------------------------------------------------
 DRAM (shared)
 ..............................................................................
-  traffic        :  50.3 MB
+  read           :  46.0 MB
+  write          :  2.0 MB
   bandwidth      :  288 B/cyc   (288 GB/s @ 1.0 GHz)
   floor          :  174.76K
 ------------------------------------------------------------------------------
@@ -221,10 +221,11 @@ python/
    └─ cycles/                 the cycle estimator
       ├─ __main__.py          entry point: python -m sim_stats.cycles
       ├─ parse.py             trace → per-kernel work records; CONSUMED_EVENTS
-      ├─ types.py             dataclasses + built-in profile data (WORMHOLE_B0, DEFAULT)
-      ├─ model.py             cycle math, per-node rollup, profile resolvers, build_estimate
+      ├─ types.py             dataclasses (schema only)
+      ├─ model.py             cycle math, per-node rollup, profile load/resolve, build_estimate
       ├─ report.py            summary / detailed / JSON / reload renderers
-      └─ cli.py               argument wiring
+      ├─ cli.py               argument wiring
+      └─ hw_profiles/         built-in profile data, one JSON per part (wormhole_b0, blackhole)
 ```
 
 The only cross-package coupling is the trace itself: the sim (producer) defines the event schema and emits events; `cycles` (consumer) reads the file. `--cycles` adds one lazy, one-directional import (`sim` → `sim_stats`) purely for ergonomics; `sim_stats` is top-level in both the source and installed layouts, so that import is stable.
@@ -235,13 +236,13 @@ Today the estimator has its own runnable entry (`python -m sim_stats.cycles`, ba
 
 ## Validation
 
-Under ideal-peak there are no hardware labels, so the estimator is validated for correctness, behavior, and sensitivity — not accuracy.
+Under ideal-peak there are no per-kernel hardware labels, so the estimator is validated for correctness, behavior, and sensitivity — not fit to measured cycles.
 
 - **Correctness** (regression fixtures): invariants — `2× tiles → 2× compute cycles`; `max(compute, movement) ≤ estimate ≤ compute + movement` (never additive); zero work → zero cycles; determinism. Plus hand-derived cross-checks on simple kernels.
 - **Behavior**: per-kernel decomposition (compute vs movement, dominant term, bound class) across a work-count matrix (compute-bound / memory-bound / mixed / multi-node), small → large.
 - **Sensitivity**: sweep the profile and confirm estimates and bound class shift sensibly.
 
-Accuracy against profiled device cycles (`tt-metal` `ReadDeviceProfilerResults`, `PROFILER build`) is deferred until profiling data exists; the residual against ideal-peak is the utilization factor for later non-ideal modelling.
+Program-level accuracy against profiled device cycles has been spot-checked separately: the ideal-peak invariant (`measured ≥ estimate`) holds, and the measured-to-estimate residual is the utilization factor for later non-ideal modelling.
 
 ---
 
@@ -250,6 +251,7 @@ Accuracy against profiled device cycles (`tt-metal` `ReadDeviceProfilerResults`,
 - **Compute rates are partial** — the SFPU default is the ideal 1-instruction floor (32 elem/clk); real SFPU ops cost more, scaling with instruction count (kernel-dependent → profiling), and the SFPU unpack/pack-BW limit is not modelled. The matmul (FPU) rate is still a placeholder pending its cycles/tile spec.
 - **dtype-blind** — `dtype` is not emitted, so compute rates key on `op_type` alone, and movement uses a fixed `bytes_per_tile` (bf16) regardless of tensor dtype.
 - **`broadcast` / `transpose` are not charged** as compute.
-- **Latency regime** — a crude Tier-1 fill/drain correction is included (see the model section); the rigorous version (exact fill/drain, cross-node serialization) still needs the dependency DAG.
+- **Latency regime** — only the crude fill/drain correction (see the model section); the rigorous version (exact fill/drain, cross-node serialization) still needs the dependency DAG.
+- **DRAM ceiling is the spec, not the achievable** — `dram_aggregate_gbps = 288` (spec) keeps the bound valid but loose (~265 is achievable). Tightening to ~265 risks breaking the `measured ≥ estimate` invariant; a per-workload utilization factor is the cleaner direction.
 - **Behavioral-coverage and sensitivity sweeps**, and per-family / per-size reporting, are not yet built out.
 - **Unified `sim_stats` entry (open — needs discussion)** — a `python -m sim_stats stats|cycles` subcommand dispatcher instead of two separate entries; restructures the stats tool, so its own change.

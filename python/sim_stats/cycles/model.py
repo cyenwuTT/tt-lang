@@ -12,8 +12,8 @@ Turns per-kernel work into cycles and combines them into a ``CycleEstimate``:
 - :func:`per_node_rollup` — the single per-node aggregation (max over a node).
 - :func:`build_estimate` — assemble the canonical ``CycleEstimate``.
 
-Profile resolution (:func:`resolve_profile` / :func:`load_profile_json` /
-:func:`get_profile`) also lives here; the profile *data* is in :mod:`types`.
+Profile loading (:func:`resolve_profile` / :func:`load_profile_json`) lives here;
+profile *data* is JSON under ``hw_profiles/``.
 
 The dependency-DAG latency regime (fill/drain, cross-node serialization) is out of
 scope; see docs/development/CycleEstimator.md.
@@ -25,8 +25,6 @@ import json
 from pathlib import Path
 
 from .types import (
-    DEFAULT,
-    _PROFILES,
     CycleEstimate,
     HardwareProfile,
     KernelEstimate,
@@ -151,7 +149,7 @@ def program_from_node_bound(
     :func:`build_estimate`) pass ``node_bound`` here to avoid re-walking the
     kernels; :func:`program_breakdown` computes it and delegates.
     """
-    agg_bw = hw.aggregate_dram_bandwidth()
+    agg_bw = hw.dram_aggregate_bw
     dram_floor = total_dram_bytes(kernels, hw) / agg_bw if agg_bw > 0.0 else 0.0
 
     if dram_floor > node_bound:
@@ -209,7 +207,7 @@ def _pipeline_items(kernels: list[KernelWork]) -> dict[str, int]:
 def per_node_fill_drain_bound(
     kernel_estimates: list[KernelEstimate], kernels: list[KernelWork]
 ) -> float:
-    """Tier-1 per-node bound including crude pipeline fill/drain.
+    """Per-node bound including the crude pipeline fill/drain correction.
 
     For each node, treat its kernels as pipeline stages with cycles ``C_i`` and let
     ``N`` be the node's pipeline-item count. The standard pipeline time is
@@ -260,7 +258,7 @@ def build_estimate(kernels: list[KernelWork], hw: HardwareProfile) -> CycleEstim
     )
     node_bound_reason = at_max[0].bound if at_max else "-"
 
-    # Tier-1 pipeline fill/drain feeds the per-node path; dram_floor is unchanged.
+    # Fill/drain feeds the per-node path; dram_floor is unchanged.
     fd_bound = per_node_fill_drain_bound(kernel_estimates, kernels)
     node_fill_drain = fd_bound - node_bound
 
@@ -290,25 +288,19 @@ def build_estimate(kernels: list[KernelWork], hw: HardwareProfile) -> CycleEstim
 
 
 # ---------------------------------------------------------------------------
-# Hardware profile resolution (profile data lives in types.py)
+# Hardware-profile loading
 # ---------------------------------------------------------------------------
+# Built-in profiles: one JSON per part in hw_profiles/ (wormhole_b0 = default).
 
-
-def get_profile(name: str) -> HardwareProfile:
-    """Return a built-in profile by name, or raise with the known names."""
-    try:
-        return _PROFILES[name]
-    except KeyError:
-        known = ", ".join(sorted(_PROFILES))
-        raise KeyError(f"unknown hardware profile {name!r}; known: {known}") from None
+_HW_PROFILES_DIR = Path(__file__).parent / "hw_profiles"
+_DEFAULT_PROFILE = "wormhole_b0"
 
 
 def load_profile_json(path: Path | str) -> HardwareProfile:
-    """Load a custom HardwareProfile from a JSON file.
+    """Read, validate, and build a HardwareProfile from a JSON file.
 
-    JSON keys mirror the dataclass fields; ``compute_rate`` is a list of
-    ``[op_type, dtype, rate]`` triples. Raises FileNotFoundError / ValueError
-    with the file path on a missing or malformed profile.
+    All fields optional (defaults applied); unknown keys ignored. Raises
+    FileNotFoundError / ValueError with the path on a missing or malformed profile.
     """
     p = Path(path)
     try:
@@ -319,36 +311,53 @@ def load_profile_json(path: Path | str) -> HardwareProfile:
         raise ValueError(f"invalid JSON in hardware profile {p}: {exc}") from None
 
     try:
-        compute_rate = {
-            (str(op), str(dt)): float(rate)
-            for op, dt, rate in data.get("compute_rate", [])
-        }
+        clock_ghz = float(data.get("clock_ghz", 1.0))
+        bytes_per_tile = float(data.get("bytes_per_tile", 2048.0))
+        compute_rate_default = float(data.get("compute_rate_default", 1.0))
+        if min(clock_ghz, bytes_per_tile, compute_rate_default) <= 0:
+            raise ValueError(
+                "clock_ghz, bytes_per_tile, compute_rate_default must be > 0"
+            )
         return HardwareProfile(
             name=str(data.get("name", p.stem)),
-            compute_rate=compute_rate,
-            compute_rate_default=float(data["compute_rate_default"]),
-            noc_bw={str(k): float(v) for k, v in data["noc_bw"].items()},
+            compute_rate={
+                (str(op), str(dt)): float(rate)
+                for op, dt, rate in data.get("compute_rate", [])
+            },
+            compute_rate_default=compute_rate_default,
+            noc_bw={str(k): float(v) for k, v in data.get("noc_bw", {}).items()},
             noc_latency={
                 str(k): float(v) for k, v in data.get("noc_latency", {}).items()
             },
-            clock_ghz=float(data["clock_ghz"]),
-            bytes_per_tile=float(data["bytes_per_tile"]),
+            clock_ghz=clock_ghz,
+            bytes_per_tile=bytes_per_tile,
             dm_engines=int(data.get("dm_engines", 1)),
-            dram_aggregate_bw=float(data.get("dram_aggregate_bw", 0.0)),
+            # DRAM peak is a datasheet GB/s; normalize to B/cyc by the core clock.
+            dram_aggregate_bw=float(data.get("dram_aggregate_gbps", 0.0)) / clock_ghz,
         )
-    except (KeyError, TypeError, ValueError) as exc:
+    except (AttributeError, TypeError, ValueError) as exc:
         raise ValueError(f"malformed hardware profile {p}: {exc}") from None
 
 
 def resolve_profile(name_or_path: str | None) -> HardwareProfile:
-    """Resolve a built-in profile name, a path to a JSON profile file, or None.
+    """Resolve a ``--hw-profile`` input to a HardwareProfile.
 
-    ``None`` (or empty) yields :data:`types.DEFAULT`; a value ending in ``.json``
-    is loaded from file; otherwise it is looked up as a built-in name. Used by the
-    CLI ``--hw-profile`` option and the ``tt-lang-sim --cycles`` path.
+    None → default (wormhole_b0); a path (``.json`` or a directory component) →
+    that file; a bare name → ``hw_profiles/<name>.json``.
     """
-    if not name_or_path:
-        return DEFAULT
-    if name_or_path.endswith(".json"):
-        return load_profile_json(name_or_path)
-    return get_profile(name_or_path)
+    if not name_or_path:  # default
+        path = _HW_PROFILES_DIR / f"{_DEFAULT_PROFILE}.json"
+    else:
+        candidate = Path(name_or_path)
+        if candidate.suffix == ".json" or len(candidate.parts) > 1:  # custom path
+            path = candidate
+        else:  # bundled name
+            path = _HW_PROFILES_DIR / f"{name_or_path}.json"
+            if not path.is_file():
+                known = ", ".join(
+                    sorted(q.stem for q in _HW_PROFILES_DIR.glob("*.json"))
+                )
+                raise ValueError(
+                    f"unknown hardware profile {name_or_path!r}; known: {known}"
+                )
+    return load_profile_json(path)
