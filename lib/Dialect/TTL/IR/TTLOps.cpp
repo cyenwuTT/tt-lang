@@ -13,11 +13,11 @@
 #include "mlir/IR/DialectImplementation.h" // IWYU pragma: keep
 #include "mlir/Interfaces/TilingInterface.h"
 #include "mlir/Support/LogicalResult.h"
+#include "ttlang/Dialect/TTCore/IR/TTCoreOpsTypes.h"
 #include "ttlang/Dialect/TTL/IR/TTL.h"
 #include "ttlang/Dialect/TTL/IR/TTLOpsAttrs.h" // IWYU pragma: keep
 #include "ttlang/Dialect/TTL/IR/TTLOpsEnums.h" // IWYU pragma: keep
 #include "ttlang/Dialect/TTL/IR/TTLOpsUtils.h"
-#include "ttmlir/Dialect/TTCore/IR/TTCoreOpsTypes.h"
 #include "llvm/ADT/TypeSwitch.h" // IWYU pragma: keep
 #include <cstdint>
 #include <functional>
@@ -631,6 +631,16 @@ mlir::tt::ttl::ComputeOp::getTiledImplementation(
   result.tiledValues = tiledOp.getResults();
   result.generatedSlices = std::move(generatedSlices);
   return result;
+}
+
+// ttl.compute does not consult pack/unpack inner-tile alignment hints; forward
+// to the hint-less overload (matches the TilingInterface default).
+llvm::FailureOr<mlir::TilingResult>
+mlir::tt::ttl::ComputeOp::getTiledImplementation(
+    mlir::OpBuilder &b, llvm::ArrayRef<mlir::OpFoldResult> offsets,
+    llvm::ArrayRef<mlir::OpFoldResult> sizes,
+    llvm::ArrayRef<mlir::InnerTileAlignment>) {
+  return getTiledImplementation(b, offsets, sizes);
 }
 
 /// Map iteration-domain offsets/sizes to the result tensor's offsets/sizes
