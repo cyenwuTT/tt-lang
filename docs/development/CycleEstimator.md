@@ -51,15 +51,16 @@ The per-node NoC term (a single core's transfer/latency) and the aggregate DRAM 
 
 Under ideal-peak with full pipelining, connected producer/consumer kernels overlap in steady state, so there is no serial sum along a dependency chain. The roofline **is** the estimate, not a lower bound. The model is deterministic from (profile, trace) and needs no measured-cycle labels.
 
-**Crude fill/drain correction.**
-Pure throughput ignores a pipeline's fill (first item through read→compute→write) and drain (last item). A deterministic correction treats a node's kernels as stages with cycles `C_i` and `N` pipeline items (the write kernel's movement-op count; `N ≥ 1`):
+**Fill/drain — reported, not folded into the bound.**
+Pure throughput ignores a pipeline's fill (first item through read→compute→write) and drain (last item). A deterministic estimate of that overhead treats a node's kernels as stages with cycles `C_i` and `N` pipeline items (the write kernel's movement-op count; `N ≥ 1`):
 
 ```
-node_time    = max_i(C_i) + (Σ_i C_i - max_i C_i) / N
-T_program    = max( max_node(node_time), dram_floor )
+node_time  = max_i(C_i) + (Σ_i C_i - max_i C_i) / N     # fill/drain-inclusive per node
+fill_drain = max_node(node_time) − node_bound           # reported as `node_fill_drain`
+T_program  = max( node_bound, dram_floor )              # the roofline — the reported estimate
 ```
 
-Large `N` recovers pure throughput (`max_i C_i`); `N = 1` gives a serial sum. Only the per-node path is affected — `dram_floor` is untouched, so a DRAM-bound program is unchanged. Reported as `Fill/drain` (`node_fill_drain`). It's **crude**: it assumes a read/compute/write stage shape and one item-count per node.
+`fill_drain` is **reported for information only — it is NOT added to `T_program`.** It's a crude, unprovable heuristic (assumes a read/compute/write stage shape, one item-count per node) that can *exceed* real per-node overhead: folding it in pushed the estimate *above* measured cycles on the reuse-matmul kernel at some sizes (device-confirmed, P100a), breaking `measured ≥ estimate`. Keeping `T_program` at the pure throughput roofline preserves that behavior. (Large `N` recovers pure throughput; `N = 1` is a serial sum.)
 
 **Out of scope — the rigorous latency regime.**
 Exact fill/drain and cross-node serialization from the real dependency DAG (`kernel_block.on`, dfb push/pop, pipe send/recv) are deferred; the correction above is a coarse per-node add-on, not a DAG traversal.
@@ -251,7 +252,7 @@ Program-level accuracy against profiled device cycles has been spot-checked sepa
 - **Compute rates are partial** — the SFPU default is the ideal 1-instruction floor (32 elem/clk); real SFPU ops cost more, scaling with instruction count (kernel-dependent → profiling), and the SFPU unpack/pack-BW limit is not modelled. The matmul (FPU) rate is still a placeholder pending its cycles/tile spec.
 - **dtype-blind** — `dtype` is not emitted, so compute rates key on `op_type` alone, and movement uses a fixed `bytes_per_tile` (bf16) regardless of tensor dtype.
 - **`broadcast` / `transpose` are not charged** as compute.
-- **Latency regime** — only the crude fill/drain correction (see the model section); the rigorous version (exact fill/drain, cross-node serialization) still needs the dependency DAG.
+- **Latency regime** — not in the bound. Fill/drain is reported as an informational delta only (see the model section); the rigorous version (exact fill/drain, cross-node serialization from the dependency DAG) is still deferred.
 - **DRAM ceiling is the spec, not the achievable** — `dram_aggregate_gbps = 288` (spec) keeps the bound valid but loose (~265 is achievable). Tightening to ~265 risks breaking the `measured ≥ estimate` invariant; a per-workload utilization factor is the cleaner direction.
 - **Behavioral-coverage and sensitivity sweeps**, and per-family / per-size reporting, are not yet built out.
 - **Unified `sim_stats` entry (open — needs discussion)** — a `python -m sim_stats stats|cycles` subcommand dispatcher instead of two separate entries; restructures the stats tool, so its own change.

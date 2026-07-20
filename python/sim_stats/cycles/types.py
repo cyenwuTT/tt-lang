@@ -131,7 +131,9 @@ class CycleEstimate:
     nodes: list[NodeEstimate] = field(default_factory=list[NodeEstimate])
     node_bound: float = 0.0  # max over nodes of per-node cycles (throughput)
     node_bound_reason: str = "compute"  # bound of the slowest node ("compute"|"memory")
-    node_fill_drain: float = 0.0  # crude fill/drain on the per-node path
+    node_fill_drain: float = (
+        0.0  # informational only; NOT in program_cycles (crude, can overshoot)
+    )
 
 
 # Profile *data* is JSON under hw_profiles/, loaded by :mod:`model`

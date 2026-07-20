@@ -258,12 +258,16 @@ def build_estimate(kernels: list[KernelWork], hw: HardwareProfile) -> CycleEstim
     )
     node_bound_reason = at_max[0].bound if at_max else "-"
 
-    # Fill/drain feeds the per-node path; dram_floor is unchanged.
+    # program_cycles is the throughput lower bound: max(node_bound, dram_floor).
+    # Fill/drain is reported as an informational delta only — NOT folded into the
+    # bound. It is a crude, unprovable heuristic that can exceed real per-node
+    # overhead (device-confirmed on the reuse kernel: it broke `measured >= estimate`
+    # at some sizes), so including it would forfeit the lower-bound guarantee.
     fd_bound = per_node_fill_drain_bound(kernel_estimates, kernels)
     node_fill_drain = fd_bound - node_bound
 
     prog_cycles, program_bound, dram_floor, _fd = program_from_node_bound(
-        kernels, hw, fd_bound
+        kernels, hw, node_bound
     )
 
     dram_read, dram_write = dram_bytes_by_direction(kernels, hw)
