@@ -53,7 +53,7 @@ from .ttnnsim import (
     tile_count_from_tensor,
     tile_shape_from_tensor,
 )
-from .trace import TRACE, trace
+from .trace import TRACE, dtype_name, trace
 from .typedefs import Index, IndexType, PositiveInt, Shape, Size
 from .greenlet_scheduler import block_if_needed
 
@@ -180,6 +180,11 @@ class Block:
             self._sm.initialize()
         else:
             self._sm.set_unrestricted()
+
+    @property
+    def dtype(self):
+        """Declared logical dtype of the block's tiles (bf16/fp32/bfloat8_b)."""
+        return self._buf.dtype
 
     def __enter__(self) -> "Block":
         """Context manager entry - returns self for use in with statement."""
@@ -830,7 +835,12 @@ class Block:
 
         # [cycle-estimator] emit before the dry-run skip so dry-run records the work.
         if TRACE.enabled:
-            trace("compute_op", op_type=op.__name__, tiles=len(self))
+            trace(
+                "compute_op",
+                op_type=op.__name__,
+                tiles=len(self),
+                dtype=dtype_name(self.dtype),
+            )
 
         # Skip the actual elementwise compute in dry-run: tile-grid shape and
         # source-block tracking are all the downstream pipeline needs. The
@@ -1644,5 +1654,7 @@ def matmul(a: Block, b: Block, _output_hint: Optional[Block] = None) -> Block:
     if TRACE.enabled:
         m, k = a.shape[-2], a.shape[-1]
         n = b.shape[-1]
-        trace("compute_op", op_type="matmul", tiles=m * k * n)  # MAC-tile volume
+        trace(
+            "compute_op", op_type="matmul", tiles=m * k * n, dtype=dtype_name(a.dtype)
+        )  # MAC-tile volume
     return result_block

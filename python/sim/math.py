@@ -27,7 +27,11 @@ from .dfb import (
     matmul,
     _dry_run_result,
 )
-from .trace import TRACE, trace  # [cycle-estimator] compute_op instrumentation
+from .trace import (  # [cycle-estimator] compute_op instrumentation
+    TRACE,
+    dtype_name,
+    trace,
+)
 from .ttnnsim import ROW_MAJOR_LAYOUT, Tensor
 from .typedefs import PositiveInt
 
@@ -55,7 +59,12 @@ def _create_unary_op_wrapper(
     def wrapper(block: Block) -> Block:
         # [cycle-estimator] emit before the dry-run skip so dry-run records the work.
         if TRACE.enabled:
-            trace("compute_op", op_type=name, tiles=len(block))
+            trace(
+                "compute_op",
+                op_type=name,
+                tiles=len(block),
+                dtype=dtype_name(block.dtype),
+            )
         if _is_dry_run():
             return _dry_run_result(block.shape, block)
         # Apply the operation to each tensor in the block
@@ -165,7 +174,12 @@ def _apply_binary_op(
     # [cycle-estimator] emit before the dry-run skip so dry-run records the work.
     # Generic op_type: no op name is threaded here (max/min/compare).
     if TRACE.enabled:
-        trace("compute_op", op_type="eltwise_binary", tiles=len(a))
+        trace(
+            "compute_op",
+            op_type="eltwise_binary",
+            tiles=len(a),
+            dtype=dtype_name(a.dtype),
+        )
     if _is_dry_run():
         return _dry_run_result(a_shape, a, b)
     layout = a.layout
@@ -197,7 +211,12 @@ def _apply_unary_with_params(
     # [cycle-estimator] emit before the dry-run skip so dry-run records the work.
     # Generic op_type: no op name is threaded here.
     if TRACE.enabled:
-        trace("compute_op", op_type="eltwise_unary", tiles=len(block))
+        trace(
+            "compute_op",
+            op_type="eltwise_unary",
+            tiles=len(block),
+            dtype=dtype_name(block.dtype),
+        )
     if _is_dry_run():
         return _dry_run_result(block.shape, block)
     layout = block.layout
@@ -540,7 +559,12 @@ def _reduce_impl(
 
     # [cycle-estimator] emit before the dry-run skip so dry-run records the work.
     if TRACE.enabled:
-        trace("compute_op", op_type=f"reduce_{op}", tiles=len(block))
+        trace(
+            "compute_op",
+            op_type=f"reduce_{op}",
+            tiles=len(block),
+            dtype=dtype_name(block.dtype),
+        )
     if _is_dry_run():
         return _dry_run_result(result_shape, block)
 

@@ -153,8 +153,7 @@ Not instrumented:
 
 The pipeline produces one canonical `CycleEstimate`; every view is a pure function of it (compute once, render many).
 
-- **Summary** (default) — per-node roll-up: active nodes, per-node cycles, utilization, and a bound-class table (compute vs memory). `--include-zero-kernels`
-  also lists idle nodes.
+- **Summary** (default) — per-node roll-up: active nodes, per-node cycles, utilization, and a bound-class table (compute vs memory). `--include-zero-kernels` also lists idle nodes.
 - **Detailed** (`--detailed`) — the full per-kernel table.
 - **JSON** (`--json-out`) — self-describing (`tool`, `schema_version`, profile, and er-kernel work + cycles).
 - **Re-render** (`--view-report REPORT.json`) — reload a saved JSON report and render it without re-running.
@@ -250,7 +249,7 @@ Program-level accuracy against profiled device cycles has been spot-checked sepa
 ## Limitations & Deferred Work
 
 - **Compute rates are partial** — the SFPU default is the ideal 1-instruction floor (32 elem/clk); real SFPU ops cost more, scaling with instruction count (kernel-dependent → profiling), and the SFPU unpack/pack-BW limit is not modelled. The matmul (FPU) rate is still a placeholder pending its cycles/tile spec.
-- **dtype-blind** — `dtype` is not emitted, so compute rates key on `op_type` alone, and movement uses a fixed `bytes_per_tile` (bf16) regardless of tensor dtype.
+- **dtype** — compute rate keys on `op_type` (the driver is fidelity, not dtype). Movement byte-size follows the profile's `bytes_per_tile`; match it to the dtype (bf16 2048 / fp32 4096 / bfp8 1024).
 - **`broadcast` / `transpose` are not charged** as compute.
 - **Latency regime** — not in the bound. Fill/drain is reported as an informational delta only (see the model section); the rigorous version (exact fill/drain, cross-node serialization from the dependency DAG) is still deferred.
 - **DRAM ceiling is the spec, not the achievable** — `dram_aggregate_gbps = 288` (spec) keeps the bound valid but loose (~265 is achievable). Tightening to ~265 risks breaking the `measured ≥ estimate` invariant; a per-workload utilization factor is the cleaner direction.

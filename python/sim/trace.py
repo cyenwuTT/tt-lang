@@ -144,6 +144,25 @@ def trace(event: str, **data: Any) -> None:
     )
 
 
+def dtype_name(dt: object) -> str:
+    """Canonical short name for a declared dtype (bf16 / fp32 / fp16 / bfp8 / ...).
+
+    Works on any dtype repr (torch dtypes or the sim's declared-dtype objects) so
+    it needs no import of the dtype classes. Feeds the ``compute_op`` / ``copy``
+    trace so the cycle estimator can key rates and tile bytes on dtype.
+    """
+    s = str(dt).lower()
+    if "bfloat8" in s or "bfp8" in s:
+        return "bfp8"
+    if "bfloat16" in s:
+        return "bf16"
+    if "float32" in s:
+        return "fp32"
+    if "float16" in s:
+        return "fp16"
+    return str(dt).replace("torch.", "")
+
+
 def get_pipe_name(pipe: Any) -> str:
     """Return a stable display name for a Pipe, matching the stats naming convention.
 
