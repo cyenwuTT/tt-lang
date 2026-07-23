@@ -258,12 +258,15 @@ install(DIRECTORY python/pykernel DESTINATION python_packages/ttl
         PATTERN "__pycache__" EXCLUDE)
 install(DIRECTORY python/sim_stats DESTINATION python_packages
         FILES_MATCHING PATTERN "*.py"
+        PATTERN "*.json"  # bundled hardware profiles (sim_stats/cycles/hw_profiles/)
         PATTERN "__pycache__" EXCLUDE)
 
 # Install command-line scripts to the bin directory.
 install(PROGRAMS "${CMAKE_SOURCE_DIR}/bin/tt-lang-sim" DESTINATION bin)
 install(PROGRAMS "${CMAKE_SOURCE_DIR}/bin/tt-lang-sim-stats" DESTINATION bin)
 install(PROGRAMS "${CMAKE_SOURCE_DIR}/bin/tt-triage" DESTINATION bin)
+install(PROGRAMS "${CMAKE_SOURCE_DIR}/bin/tt-lang-sim-cycles" DESTINATION bin)
+
 
 # ---------------------------------------------------------------------------
 # Configuration summary
