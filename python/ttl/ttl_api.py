@@ -1225,6 +1225,7 @@ _MLIR_TYPE_TO_FORMAT = {
     "bf16": "bfloat16",
     "f16": "float16",
     "f32": "float32",
+    "bfp_bf8": "bfloat8_b",
     "i32": "int32",
     "ui32": "uint32",
     "ui16": "uint16",

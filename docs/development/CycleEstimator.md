@@ -92,7 +92,8 @@ This is what lets the estimate be label-free and deterministic: given a profile 
 | `compute_rate_default` | fallback tiles/cycle |
 | `noc_bw` | bytes/cycle by locality (`local_l1` / `remote_l1` / `dram`) |
 | `noc_latency` | fixed cycles per transfer, by locality |
-| `bytes_per_tile` | movement tile size (provisional; bf16 = 2048 B) |
+| `dram_aggregate_bw` | shared GDDR6 ceiling, B/cyc (JSON stores `dram_aggregate_gbps`, ÷`clock_ghz` at load; `0` disables the ceiling) |
+| `bytes_per_tile` | movement tile size; the dtype knob (bf16 2048 / fp32 4096 / bfp8 ~1088 B) |
 | `clock_ghz` | GHz; ns reporting **and** the DRAM GB/s→B/cyc conversion at load |
 | `dm_engines` | reserved for future overlap modelling |
 
@@ -111,10 +112,13 @@ All values are sourced from tt-metal and the Wormhole ISA docs:
 | `dm_engines` | 2 | BRISC + NCRISC (METALIUM_GUIDE) |
 | `noc_bw` / `noc_latency` | 25.3 B/cyc, 293 cyc | **measured**, tt-metal `noc_latencies.yaml` (64 KB / 2589 cyc asymptote; 293-cyc small-transfer floor) |
 | `dram_aggregate_gbps` | 288 GB/s | 12 GDDR6 ch × 24 B/cyc @ 12 Gbps (tt-metal `Saturating_DRAM_bandwidth.md`). Stored as GB/s in the JSON; converted to B/cyc at load (÷ `clock_ghz`). It is the **spec upper bound** — a lower-bound model needs an *upper bound* on achievable BW, so the datasheet peak is used, not a measured figure (sustained is ~265, 92% of spec). |
-| matmul rate | 1/64 (HiFi4) | `16 × fidelity` cyc per 32³ tile-MAC (LoFi 16 / HiFi2 32 / HiFi3 48 / HiFi4 64), from `GEMM_FLOPS` + ISA `MatrixUnit.md`. tt-lang sets no fidelity → inherits tt-metal's `ComputeConfig` default **HiFi4** (`kernel_types.hpp`) |
+| matmul rate (default) | 1/64 | `16 × fidelity` cyc/tile; tt-lang sets no MathFidelity → tt-metal default **HiFi4**, fixed. |
+| matmul rate (fp32) | ≈1/68.5 | f32 args set `fp32_dest_acc_en` (`TTLSetComputeKernelConfig`) → ~7% slower. BH-calibrated. |
 | SFPU default | 1/32 | 32 elem/clk ideal 1-instruction floor (SFPU spec) |
 
-Known simplifications (see [Limitations](#limitations--deferred-work)): fidelity and dtype aren't traced — a 4× matmul swing that can flip the bound; `noc_bw` uses one measured asymptote for all localities (local L1 ≈ 2× remote, DRAM ≈ 24 B/cyc per channel); SFPU per-op cost (instruction count) is deferred.
+Known simplifications (see [Limitations](#limitations--deferred-work)): MathFidelity is fixed at HiFi4 (never set), so no fidelity swing; the one modelled dtype effect is fp32's `fp32_dest_acc_en` (~7%). `noc_bw` uses one measured asymptote for all localities (local L1 ≈ 2× remote, DRAM ≈ 24 B/cyc per channel); SFPU per-op cost (instruction count) is deferred.
+
+The bundled `blackhole` profile mirrors this structure with Blackhole (P150) values: 1.35 GHz, 512 GB/s aggregate DRAM, 60.9 B/cyc NoC.
 
 ### Simulator trace — the consumed contract
 
@@ -144,8 +148,10 @@ A trace without `compute_op` events — produced before the instrumentation, or 
 | `math._apply_binary_op` | `max`, `min`, `gt`, `lt`, `eq`, `ne` | `eltwise_binary` (generic) |
 | `math._reduce_impl` | reduce sum/max | `reduce_sum` / `reduce_max` |
 
+Each site also emits the declared `dtype` (via `dtype_name`), so compute-rate lookup uses the `(op_type, dtype)` tier and falls back to op-type-only when a profile has no dtype-specific row.
+
 Not instrumented:
-`block.broadcast` and `block.transpose` (layout ops — instrumented only if the model should charge for them). `dtype` is not currently emitted, so compute-rate lookup falls back to the op-type-only tier.
+`block.broadcast` and `block.transpose` (layout ops — instrumented only if the model should charge for them).
 
 ---
 
@@ -155,7 +161,7 @@ The pipeline produces one canonical `CycleEstimate`; every view is a pure functi
 
 - **Summary** (default) — per-node roll-up: active nodes, per-node cycles, utilization, and a bound-class table (compute vs memory). `--include-zero-kernels` also lists idle nodes.
 - **Detailed** (`--detailed`) — the full per-kernel table.
-- **JSON** (`--json-out`) — self-describing (`tool`, `schema_version`, profile, and er-kernel work + cycles).
+- **JSON** (`--json-out`) — self-describing (`tool`, `schema_version`, profile, and per-kernel work + cycles).
 - **Re-render** (`--view-report REPORT.json`) — reload a saved JSON report and render it without re-running.
 
 Example summary tail:
@@ -242,14 +248,15 @@ Under ideal-peak there are no per-kernel hardware labels, so the estimator is va
 - **Behavior**: per-kernel decomposition (compute vs movement, dominant term, bound class) across a work-count matrix (compute-bound / memory-bound / mixed / multi-node), small → large.
 - **Sensitivity**: sweep the profile and confirm estimates and bound class shift sensibly.
 
-Program-level accuracy against profiled device cycles has been spot-checked separately: the ideal-peak invariant (`measured ≥ estimate`) holds, and the measured-to-estimate residual is the utilization factor for later non-ideal modelling.
+Program-level accuracy is checked against device cycles on a matmul K-sweep (Wormhole N300, Blackhole P100a): `measured ≥ estimate` holds at every point. DRAM utilization is ~57–67% on Wormhole (residual consistent with an unmodelled NoC limit) and ~82–92% on Blackhole. dtype movement scaling and the fp32 `fp32_dest_acc_en` penalty (~7%) are device-confirmed. The residual is the utilization factor for later non-ideal modelling.
 
 ---
 
 ## Limitations & Deferred Work
 
-- **Compute rates are partial** — the SFPU default is the ideal 1-instruction floor (32 elem/clk); real SFPU ops cost more, scaling with instruction count (kernel-dependent → profiling), and the SFPU unpack/pack-BW limit is not modelled. The matmul (FPU) rate is still a placeholder pending its cycles/tile spec.
-- **dtype** — compute rate keys on `op_type` (the driver is fidelity, not dtype). Movement byte-size follows the profile's `bytes_per_tile`; match it to the dtype (bf16 2048 / fp32 4096 / bfp8 1024).
+- **Compute rates are partial** — the SFPU default is the ideal 1-instruction floor (32 elem/clk); real SFPU ops cost more, scaling with instruction count (kernel-dependent → profiling), and the SFPU unpack/pack-BW limit is not modelled. The matmul (FPU) rate is HiFi4 (64 cyc/tile) with an fp32 variant; per-fidelity variation is deferred (tt-lang fixes HiFi4).
+- **Multicast movement is uncounted** — pipe copies (`Block→Pipe`, `Pipe→Block`) carry no locality fields, so a multicast fan-out contributes zero movement work. Kernels dominated by multicast (reuse/mcast matmul) are under-modelled on the movement path; pipe-copy byte-accounting is the next model factor.
+- **dtype** — compute rate keys on `(op_type, dtype)`; the one modelled effect is fp32 matmul's `fp32_dest_acc_en` (~7%). bf16/bfp8 use the HiFi4 baseline (fidelity fixed). Movement byte-size follows `bytes_per_tile` (bf16 2048 / fp32 4096 / bfp8 ~1088).
 - **`broadcast` / `transpose` are not charged** as compute.
 - **Latency regime** — not in the bound. Fill/drain is reported as an informational delta only (see the model section); the rigorous version (exact fill/drain, cross-node serialization from the dependency DAG) is still deferred.
 - **DRAM ceiling is the spec, not the achievable** — `dram_aggregate_gbps = 288` (spec) keeps the bound valid but loose (~265 is achievable). Tightening to ~265 risks breaking the `measured ≥ estimate` invariant; a per-workload utilization factor is the cleaner direction.
