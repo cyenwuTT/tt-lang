@@ -49,7 +49,7 @@ T_program  = max( max_node( max_{k ∈ node} T_kernel(k) ), dram_floor )
 
 The per-node NoC term (a single core's transfer/latency) and the aggregate DRAM floor (the shared controller) model different resources, so the program takes the `max` of both. The report records which one bound the program (`program_bound`: `per-node` | `aggregate-dram`) and the `dram_floor` value. Without the ceiling, a K-sweep matmul stays compute-bound at every K because each of N active cores is (incorrectly) given a private DRAM lane; the aggregate ceiling flips memory-heavy points to `aggregate-dram`.
 
-Under ideal-peak with full pipelining, connected producer/consumer kernels overlap in steady state, so there is no serial sum along a dependency chain. The roofline **is** the estimate, not a lower bound. The model is deterministic from (profile, trace) and needs no measured-cycle labels.
+Under ideal-peak with full pipelining, connected producer/consumer kernels overlap in steady state, so there is no serial sum along a dependency chain. The roofline **is** the estimate — the model adds no serial-sum slack on top. Being ideal-peak, it is a tight lower bound (`measured ≥ estimate`; see [Validation](#validation)). The model is deterministic from (profile, trace) and needs no measured-cycle labels.
 
 **Fill/drain — reported, not folded into the bound.**
 Pure throughput ignores a pipeline's fill (first item through read→compute→write) and drain (last item). A deterministic estimate of that overhead treats a node's kernels as stages with cycles `C_i` and `N` pipeline items (the write kernel's movement-op count; `N ≥ 1`):
@@ -97,7 +97,7 @@ This is what lets the estimate be label-free and deterministic: given a profile 
 | `clock_ghz` | GHz; ns reporting **and** the DRAM GB/s→B/cyc conversion at load |
 | `dm_engines` | reserved for future overlap modelling |
 
-Compute-rate lookup is tiered: exact `(op_type, dtype)`, then op-type-only `(op_type, "")`, then `compute_rate_default`. The op-type-only tier lets rates be keyed by op alone when the trace carries no dtype.
+Compute-rate lookup is tiered: exact `(op_type, dtype)`, then op-type-only `(op_type, "")`, then `compute_rate_default`. The op-type-only tier applies when a profile has no dtype-specific row (or for older traces without a `dtype` field).
 
 Built-in profiles are JSON files under `hw_profiles/` (one per board); `model.py` loads and resolves them (`types.py` holds only the dataclass schema). `--hw-profile <name | path.json>` selects one — a bundled name (full stem or board family, e.g. `wormhole` → `wormhole_n300`), or a path to a custom profile anywhere.
 
@@ -111,7 +111,7 @@ All values are sourced from tt-metal and the Wormhole ISA docs:
 | `bytes_per_tile` | 2048 | bf16 32×32 tile (32·32·2 B) |
 | `dm_engines` | 2 | BRISC + NCRISC (METALIUM_GUIDE) |
 | `noc_bw` / `noc_latency` | 25.3 B/cyc, 293 cyc | **measured**, tt-metal `noc_latencies.yaml` (64 KB / 2589 cyc asymptote; 293-cyc small-transfer floor) |
-| `dram_aggregate_gbps` | 288 GB/s | 12 GDDR6 ch × 24 B/cyc @ 12 Gbps (tt-metal `Saturating_DRAM_bandwidth.md`). Stored as GB/s in the JSON; converted to B/cyc at load (÷ `clock_ghz`). It is the **spec upper bound** — a lower-bound model needs an *upper bound* on achievable BW, so the datasheet peak is used, not a measured figure (sustained is ~265, 92% of spec). |
+| `dram_aggregate_gbps` | 288 GB/s | 12 GDDR6 ch × 24 B/cyc @ 12 Gbps (tt-metal `Saturating_DRAM_bandwidth.md`). Stored as GB/s in the JSON; converted to B/cyc at load (÷ `clock_ghz`). The **spec upper bound** is used. |
 | matmul rate (default) | 1/64 | `16 × fidelity` cyc/tile; tt-lang sets no MathFidelity → tt-metal default **HiFi4**, fixed. |
 | matmul rate (fp32) | ≈1/68.5 | f32 args set `fp32_dest_acc_en` (`TTLSetComputeKernelConfig`) → ~7% slower. BH-calibrated. |
 | SFPU default | 1/32 | 32 elem/clk ideal 1-instruction floor (SFPU spec) |
@@ -248,9 +248,7 @@ Under ideal-peak there are no per-kernel hardware labels, so the estimator is va
 - **Behavior**: per-kernel decomposition (compute vs movement, dominant term, bound class) across a work-count matrix (compute-bound / memory-bound / mixed / multi-node), small → large.
 - **Sensitivity**: sweep the profile and confirm estimates and bound class shift sensibly.
 
-Program-level accuracy is checked against device cycles on a matmul K-sweep (Wormhole N300, Blackhole P100a): `measured ≥ estimate` holds at every point. 
-
-DRAM utilization is ~57–67% on Wormhole (residual consistent with an unmodelled NoC limit) and ~82–92% on Blackhole. dtype movement scaling and the fp32 `fp32_dest_acc_en` penalty (~7%) are device-confirmed. The residual is the utilization factor for later non-ideal modelling.
+Program-level accuracy is checked against device cycles on a matmul K-sweep (Wormhole N300, Blackhole P100a): `measured ≥ estimate` at every point. Achieved DRAM utilization ~57–67% (WH) / ~82–92% (BH); tt-npe shows both DRAM-dominant, not NoC-bound (0% congestion). The compute branch is exercised on a reuse-matmul (P100a) — the per-node compute bound holds. dtype movement scaling and the fp32 `fp32_dest_acc_en` penalty (~7%) are device-confirmed.
 
 ---
 
@@ -261,6 +259,6 @@ DRAM utilization is ~57–67% on Wormhole (residual consistent with an unmodelle
 - **dtype** — compute rate keys on `(op_type, dtype)`; the one modelled effect is fp32 matmul's `fp32_dest_acc_en` (~7%). bf16/bfp8 use the HiFi4 baseline (fidelity fixed). Movement byte-size follows `bytes_per_tile` (bf16 2048 / fp32 4096 / bfp8 ~1088).
 - **`broadcast` / `transpose` are not charged** as compute.
 - **Latency regime** — not in the bound. Fill/drain is reported as an informational delta only (see the model section); the rigorous version (exact fill/drain, cross-node serialization from the dependency DAG) is still deferred.
-- **DRAM ceiling is the spec, not the achievable** — `dram_aggregate_gbps = 288` (spec) keeps the bound valid but loose (~265 is achievable). Tightening to ~265 risks breaking the `measured ≥ estimate` invariant; a per-workload utilization factor is the cleaner direction.
+- **DRAM ceiling is the spec, not the achievable** — `dram_aggregate_gbps = 288` is the spec upper bound: valid but loose. A per-workload utilization factor is the cleaner tightening.
 - **Behavioral-coverage and sensitivity sweeps**, and per-family / per-size reporting, are not yet built out.
 - **Unified `sim_stats` entry (open — needs discussion)** — a `python -m sim_stats stats|cycles` subcommand dispatcher instead of two separate entries; restructures the stats tool, so its own change.
