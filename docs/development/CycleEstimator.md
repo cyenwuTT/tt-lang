@@ -99,9 +99,9 @@ This is what lets the estimate be label-free and deterministic: given a profile 
 
 Compute-rate lookup is tiered: exact `(op_type, dtype)`, then op-type-only `(op_type, "")`, then `compute_rate_default`. The op-type-only tier lets rates be keyed by op alone when the trace carries no dtype.
 
-Built-in profiles are JSON files under `hw_profiles/` (one per part); `model.py` loads and resolves them (`types.py` holds only the dataclass schema). `--hw-profile <name | path.json>` selects one — a bundled name, or a path to a custom profile anywhere.
+Built-in profiles are JSON files under `hw_profiles/` (one per board); `model.py` loads and resolves them (`types.py` holds only the dataclass schema). `--hw-profile <name | path.json>` selects one — a bundled name (full stem or board family, e.g. `wormhole` → `wormhole_n300`), or a path to a custom profile anywhere.
 
-#### `wormhole_b0` provenance
+#### `wormhole_n300` provenance
 
 All values are sourced from tt-metal and the Wormhole ISA docs:
 
@@ -118,7 +118,7 @@ All values are sourced from tt-metal and the Wormhole ISA docs:
 
 Known simplifications (see [Limitations](#limitations--deferred-work)): MathFidelity is fixed at HiFi4 (never set), so no fidelity swing; the one modelled dtype effect is fp32's `fp32_dest_acc_en` (~7%). `noc_bw` uses one measured asymptote for all localities (local L1 ≈ 2× remote, DRAM ≈ 24 B/cyc per channel); SFPU per-op cost (instruction count) is deferred.
 
-The bundled `blackhole` profile mirrors this structure with Blackhole (P150) values: 1.35 GHz, 512 GB/s aggregate DRAM, 60.9 B/cyc NoC.
+The bundled `blackhole_p100a` profile mirrors this structure with Blackhole P100a values: 1.35 GHz, 448 GB/s aggregate DRAM (7/8 GDDR6), 60.9 B/cyc NoC.
 
 ### Simulator trace — the consumed contract
 
@@ -231,7 +231,7 @@ python/
       ├─ model.py             cycle math, per-node rollup, profile load/resolve, build_estimate
       ├─ report.py            summary / detailed / JSON / reload renderers
       ├─ cli.py               argument wiring
-      └─ hw_profiles/         built-in profile data, one JSON per part (wormhole_b0, blackhole)
+      └─ hw_profiles/         built-in profile data, one JSON per board (wormhole_n300, blackhole_p100a)
 ```
 
 The only cross-package coupling is the trace itself: the sim (producer) defines the event schema and emits events; `cycles` (consumer) reads the file. `--cycles` adds one lazy, one-directional import (`sim` → `sim_stats`) purely for ergonomics; `sim_stats` is top-level in both the source and installed layouts, so that import is stable.
@@ -248,7 +248,9 @@ Under ideal-peak there are no per-kernel hardware labels, so the estimator is va
 - **Behavior**: per-kernel decomposition (compute vs movement, dominant term, bound class) across a work-count matrix (compute-bound / memory-bound / mixed / multi-node), small → large.
 - **Sensitivity**: sweep the profile and confirm estimates and bound class shift sensibly.
 
-Program-level accuracy is checked against device cycles on a matmul K-sweep (Wormhole N300, Blackhole P100a): `measured ≥ estimate` holds at every point. DRAM utilization is ~57–67% on Wormhole (residual consistent with an unmodelled NoC limit) and ~82–92% on Blackhole. dtype movement scaling and the fp32 `fp32_dest_acc_en` penalty (~7%) are device-confirmed. The residual is the utilization factor for later non-ideal modelling.
+Program-level accuracy is checked against device cycles on a matmul K-sweep (Wormhole N300, Blackhole P100a): `measured ≥ estimate` holds at every point. 
+
+DRAM utilization is ~57–67% on Wormhole (residual consistent with an unmodelled NoC limit) and ~82–92% on Blackhole. dtype movement scaling and the fp32 `fp32_dest_acc_en` penalty (~7%) are device-confirmed. The residual is the utilization factor for later non-ideal modelling.
 
 ---
 

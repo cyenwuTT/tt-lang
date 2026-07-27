@@ -48,8 +48,8 @@ def main() -> None:
         "--hw-profile",
         default=None,
         help=(
-            "Hardware profile: a built-in name or a path to a .json profile file "
-            "(default: wormhole_b0)"
+            "Hardware profile: a built-in name or board family (e.g. wormhole), "
+            "or a path to a .json profile file (default: wormhole_n300)"
         ),
     )
     parser.add_argument(

@@ -397,7 +397,8 @@ def main() -> None:
         dest="hw_profile",
         help=(
             "With --cycles, the hardware profile to estimate for: a built-in name "
-            "or a path to a .json profile (default: wormhole_b0)."
+            "or board family (e.g. wormhole), or a path to a .json profile "
+            "(default: wormhole_n300)."
         ),
     )
 

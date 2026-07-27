@@ -913,11 +913,20 @@ def test_load_profile_json_round_trip(tmp_path) -> None:
 
 
 def test_resolve_profile_accepts_builtin_name_and_json_path(tmp_path) -> None:
-    assert resolve_profile("wormhole_b0").name == "wormhole_b0"
+    assert resolve_profile("wormhole_n300").name == "wormhole_n300"
 
     p = tmp_path / "mine.json"
     _write_profile(p, name="mine")
     assert resolve_profile(str(p)).name == "mine"
+
+
+def test_resolve_profile_family_alias() -> None:
+    # A board family resolves to its single bundled profile.
+    assert resolve_profile("wormhole").name == "wormhole_n300"
+    assert resolve_profile("blackhole").name == "blackhole_p100a"
+    # An unknown name still raises.
+    with pytest.raises(ValueError, match="unknown hardware profile"):
+        resolve_profile("grayskull")
 
 
 def test_load_profile_json_missing_file_raises(tmp_path) -> None:

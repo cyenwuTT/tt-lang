@@ -294,10 +294,10 @@ def build_estimate(kernels: list[KernelWork], hw: HardwareProfile) -> CycleEstim
 # ---------------------------------------------------------------------------
 # Hardware-profile loading
 # ---------------------------------------------------------------------------
-# Built-in profiles: one JSON per part in hw_profiles/ (wormhole_b0 = default).
+# Built-in profiles: one JSON per part in hw_profiles/ (wormhole_n300 = default).
 
 _HW_PROFILES_DIR = Path(__file__).parent / "hw_profiles"
-_DEFAULT_PROFILE = "wormhole_b0"
+_DEFAULT_PROFILE = "wormhole_n300"
 
 
 def load_profile_json(path: Path | str) -> HardwareProfile:
@@ -346,8 +346,11 @@ def load_profile_json(path: Path | str) -> HardwareProfile:
 def resolve_profile(name_or_path: str | None) -> HardwareProfile:
     """Resolve a ``--hw-profile`` input to a HardwareProfile.
 
-    None → default (wormhole_b0); a path (``.json`` or a directory component) →
-    that file; a bare name → ``hw_profiles/<name>.json``.
+    None → default (wormhole_n300); a path (``.json`` or a directory component) →
+    that file; a bare name → ``hw_profiles/<name>.json``. A bare name may also be
+    a board *family* (e.g. ``wormhole`` → ``wormhole_n300``): if there is no exact
+    match, a single profile whose stem starts with ``<name>_`` is used; multiple
+    matches are ambiguous and raise.
     """
     if not name_or_path:  # default
         path = _HW_PROFILES_DIR / f"{_DEFAULT_PROFILE}.json"
@@ -355,13 +358,25 @@ def resolve_profile(name_or_path: str | None) -> HardwareProfile:
         candidate = Path(name_or_path)
         if candidate.suffix == ".json" or len(candidate.parts) > 1:  # custom path
             path = candidate
-        else:  # bundled name
+        else:  # bundled name (exact stem, or a family alias like "wormhole")
             path = _HW_PROFILES_DIR / f"{name_or_path}.json"
             if not path.is_file():
-                known = ", ".join(
-                    sorted(q.stem for q in _HW_PROFILES_DIR.glob("*.json"))
-                )
-                raise ValueError(
-                    f"unknown hardware profile {name_or_path!r}; known: {known}"
-                )
+                stems = sorted(q.stem for q in _HW_PROFILES_DIR.glob("*.json"))
+                matches = [
+                    s
+                    for s in stems
+                    if s == name_or_path or s.startswith(f"{name_or_path}_")
+                ]
+                if len(matches) == 1:
+                    path = _HW_PROFILES_DIR / f"{matches[0]}.json"
+                elif len(matches) > 1:
+                    raise ValueError(
+                        f"ambiguous hardware profile {name_or_path!r}; "
+                        f"matches: {', '.join(matches)}"
+                    )
+                else:
+                    raise ValueError(
+                        f"unknown hardware profile {name_or_path!r}; "
+                        f"known: {', '.join(stems)}"
+                    )
     return load_profile_json(path)
