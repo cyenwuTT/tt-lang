@@ -6,11 +6,17 @@
 
 The estimator is a trace **consumer**: it reads the JSONL trace file and never imports the simulator. The trace file is the only contract between the two, which is why the estimator can run wherever a trace can be copied, independent of the sim.
 
-Quick start:
+**Quick Start —** 
+From a built checkout:
 
 ```
-tt-lang-sim prog.py --cycles       # run + estimate in one step
-tt-lang-sim-cycles trace.jsonl     # estimate from a saved trace
+source build/env/activate      # puts tt-lang-sim / tt-lang-sim-cycles on PATH
+
+# run a program and estimate in one step:
+tt-lang-sim examples/matmul-tutorial/step_1_single_node_single_tile_block.py --cycles
+
+# or estimate from a previously saved trace:
+tt-lang-sim-cycles trace.jsonl
 ```
 
 See [Command-Line Interface](#command-line-interface) for the full flag set.
@@ -23,20 +29,20 @@ The trace supplies **work** (how many tiles each op computes or moves) and **str
 
 Cycles come entirely from work ÷ rate.
 
-**Per op.** Compute and movement each have a peak rate from the profile:
+**Per op:** Compute and movement each have a peak rate from the profile:
 
 ```
 compute op:   cyc = tiles / R_compute(op_type, dtype)
 movement op:  cyc = latency(locality) + (tiles × bytes_per_tile) / R_noc(locality)
 ```
 
-**Per kernel.** The compute engine and the data-movement engine run concurrently, so the kernel time is the larger of the two serial paths, not their sum:
+**Per kernel:** The compute engine and the data-movement engine run concurrently, so the kernel time is the larger of the two serial paths, not their sum:
 
 ```
 T_kernel = max( Σ cyc_compute , Σ cyc_movement )
 ```
 
-**Per program.** The model is throughput-bound, with two levels of overlap:
+**Per program:** The model is throughput-bound, with two levels of overlap:
 
 - *Within a node* — the reader / compute / writer kernels run on that core's concurrent RISCs, so the node's time is the `max` of its kernels.
 - *Across nodes* — distinct nodes are separate cores in parallel, so the program time is the `max` over nodes.
@@ -47,9 +53,11 @@ dram_floor = (Σ dram_bytes) / dram_aggregate_bw
 T_program  = max( max_node( max_{k ∈ node} T_kernel(k) ), dram_floor )
 ```
 
-The per-node NoC term (a single core's transfer/latency) and the aggregate DRAM floor (the shared controller) model different resources, so the program takes the `max` of both. The report records which one bound the program (`program_bound`: `per-node` | `aggregate-dram`) and the `dram_floor` value. Without the ceiling, a K-sweep matmul stays compute-bound at every K because each of N active cores is (incorrectly) given a private DRAM lane; the aggregate ceiling flips memory-heavy points to `aggregate-dram`.
+The per-node NoC term (a single core's transfer/latency) and the aggregate DRAM floor (the shared controller) model different resources, so the program takes the `max` of both. 
 
-Under ideal-peak with full pipelining, connected producer/consumer kernels overlap in steady state, so there is no serial sum along a dependency chain. The roofline **is** the estimate — the model adds no serial-sum slack on top. Being ideal-peak, it is a tight lower bound (`measured ≥ estimate`; see [Validation](#validation)). The model is deterministic from (profile, trace) and needs no measured-cycle labels.
+The report records which one bound the program (`program_bound`: `per-node` | `aggregate-dram`) and the `dram_floor` value. Without the ceiling, a K-sweep matmul stays compute-bound at every K because each of N active cores is (incorrectly) given a private DRAM lane; the aggregate ceiling flips memory-heavy points to `aggregate-dram`.
+
+Under ideal-peak with full pipelining, connected producer/consumer kernels overlap in steady state, so there is no serial sum along a dependency chain. The roofline **is** the estimate — the model adds no serial-sum slack on top. Being ideal-peak, it is a tight lower bound (`measured ≥ estimate`; see [Hardware Validation](#hardware-validation)).
 
 **Fill/drain — reported, not folded into the bound.**
 Pure throughput ignores a pipeline's fill (first item through read→compute→write) and drain (last item). A deterministic estimate of that overhead treats a node's kernels as stages with cycles `C_i` and `N` pipeline items (the write kernel's movement-op count; `N ≥ 1`):
@@ -60,7 +68,7 @@ fill_drain = max_node(node_time) − node_bound           # reported as `node_fi
 T_program  = max( node_bound, dram_floor )              # the roofline — the reported estimate
 ```
 
-`fill_drain` is **reported for information only — it is NOT added to `T_program`.** It's a crude, unprovable heuristic (assumes a read/compute/write stage shape, one item-count per node) that can *exceed* real per-node overhead: folding it in pushed the estimate *above* measured cycles on the reuse-matmul kernel at some sizes (device-confirmed, P100a), breaking `measured ≥ estimate`. Keeping `T_program` at the pure throughput roofline preserves that behavior. (Large `N` recovers pure throughput; `N = 1` is a serial sum.)
+`fill_drain` is **reported for information only — it is NOT added to `T_program`.** It's a crude heuristic (assumes a read/compute/write stage shape, one item-count per node) that can *exceed* real per-node overhead — folding it in pushed the estimate *above* measured cycles on the reuse-matmul (P100a) at some sizes, breaking `measured ≥ estimate`. So it stays reported-only.
 
 **Out of scope — the rigorous latency regime.**
 Exact fill/drain and cross-node serialization from the real dependency DAG (`kernel_block.on`, dfb push/pop, pipe send/recv) are deferred; the correction above is a coarse per-node add-on, not a DAG traversal.
@@ -73,7 +81,7 @@ The simulator tick is a **logical clock**: it increments by one per productive s
 
 Two consequences shape the model:
 
-- A tick duration cannot be multiplied by a rate to yield cycles. Any model fit to reconstruct tick durations predicts scheduling behavior, not hardware — reproducing a logical clock from its own sub-intervals is tautological.
+- A tick duration cannot be multiplied by a rate to yield cycles. Any model fit to tick durations predicts scheduling behavior, not hardware.
 - Physical quantities in the trace are the **work-counts** (tiles, and bytes derived from tiles), not the timing. The estimator therefore multiplies work by hardware rates and ignores tick durations entirely.
 
 This is what lets the estimate be label-free and deterministic: given a profile and a trace, the answer is fixed, with no calibration step.
@@ -111,12 +119,12 @@ All values are sourced from tt-metal and the Wormhole ISA docs:
 | `bytes_per_tile` | 2048 | bf16 32×32 tile (32·32·2 B) |
 | `dm_engines` | 2 | BRISC + NCRISC (METALIUM_GUIDE) |
 | `noc_bw` / `noc_latency` | 25.3 B/cyc, 293 cyc | **measured**, tt-metal `noc_latencies.yaml` (64 KB / 2589 cyc asymptote; 293-cyc small-transfer floor) |
-| `dram_aggregate_gbps` | 288 GB/s | 12 GDDR6 ch × 24 B/cyc @ 12 Gbps (tt-metal `Saturating_DRAM_bandwidth.md`). Stored as GB/s in the JSON; converted to B/cyc at load (÷ `clock_ghz`). The **spec upper bound** is used. |
+| `dram_aggregate_gbps` | 288 GB/s | 12 GDDR6 ch × 24 B/cyc @ 12 Gbps (tt-metal `Saturating_DRAM_bandwidth.md`); the **spec upper bound** is used. |
 | matmul rate (default) | 1/64 | `16 × fidelity` cyc/tile; tt-lang sets no MathFidelity → tt-metal default **HiFi4**, fixed. |
 | matmul rate (fp32) | ≈1/68.5 | f32 args set `fp32_dest_acc_en` (`TTLSetComputeKernelConfig`) → ~7% slower. BH-calibrated. |
 | SFPU default | 1/32 | 32 elem/clk ideal 1-instruction floor (SFPU spec) |
 
-Known simplifications (see [Limitations](#limitations--deferred-work)): MathFidelity is fixed at HiFi4 (never set), so no fidelity swing; the one modelled dtype effect is fp32's `fp32_dest_acc_en` (~7%). `noc_bw` uses one measured asymptote for all localities (local L1 ≈ 2× remote, DRAM ≈ 24 B/cyc per channel); SFPU per-op cost (instruction count) is deferred.
+Known simplifications: `noc_bw` uses one measured asymptote for all localities (local L1 ≈ 2× remote, DRAM ≈ 24 B/cyc per channel); fidelity is fixed at HiFi4.
 
 The bundled `blackhole_p100a` profile mirrors this structure with Blackhole P100a values: 1.35 GHz, 448 GB/s aggregate DRAM (7/8 GDDR6), 60.9 B/cyc NoC.
 
@@ -188,17 +196,27 @@ Active nodes   :  48 / 56   (8 idle)
 
 ---
 
+## Testing
+
+Under ideal-peak there are no per-kernel hardware labels, so the estimator is tested for correctness, behavior, and sensitivity — not fit to measured cycles.
+
+- **Correctness** (regression fixtures): the per-kernel estimate is deterministic, linear in work, and the `max` of compute and movement. Zero work gives zero cycles.
+- **Behavior**: per-kernel decomposition (compute vs movement, dominant term, bound class) across a work-count matrix (compute-bound / memory-bound / mixed / multi-node), small → large.
+- **Sensitivity**: sweep the profile and confirm estimates and bound class shift sensibly.
+
+---
+
 ## Command-Line Interface
 
 **Offline** — analyze a saved trace:
 
 ```
 tt-lang-sim-cycles trace.jsonl
-    [-d | --detailed]               # full per-kernel table
-    [-p | --hw-profile NAME|FILE.json]     # built-in profile name or custom JSON
-    [-o | --json-out OUT.json]      # write a self-describing report
-    [-r | --view-report REPORT.json]       # reload + render a saved report
-    [--include-zero-kernels]        # summary: also list idle nodes
+    [-d | --detailed]                  # show per-kernel table
+    [-p | --hw-profile NAME|FILE.json] # use specific profile
+    [-o | --json-out OUT.json]         # output report
+    [-r | --view-report REPORT.json]   # review saved report
+    [--include-zero-kernels]           # show idle nodes
 ```
 
 **Inline** — run and estimate in one step:
@@ -216,49 +234,34 @@ Runs the program, then prints the estimate **summary** from the same in-memory t
 ```
 python/
 ├─ sim/                       simulator · PRODUCER
-│  ├─ trace.py                defines the compute event + category (registry)
-│  ├─ math.py, dfb.py         emit compute_op at op sites
-│  ├─ copy.py                 emits copy_end with per-locality tile counts
-│  └─ ttlang_sim.py           --trace / --cycles
+│  ├─ trace.py                event schema + registry
+│  ├─ math.py, dfb.py         emit compute_op
+│  └─ copy.py                 emits copy_end (per-locality tiles)
 │
-└─ sim_stats/                 trace analysis · CONSUMER
-   ├─ __main__.py             tt-lang-sim-stats (tensor/pipe/dfb tables)
-   ├─ utils.py                shared trace + kernel-name helpers
-   └─ cycles/                 the cycle estimator
-      ├─ __main__.py          entry point: python -m sim_stats.cycles
-      ├─ parse.py             trace → per-kernel work records; CONSUMED_EVENTS
-      ├─ types.py             dataclasses (schema only)
-      ├─ model.py             cycle math, per-node rollup, profile load/resolve, build_estimate
-      ├─ report.py            summary / detailed / JSON / reload renderers
-      ├─ cli.py               argument wiring
-      └─ hw_profiles/         built-in profile data, one JSON per board (wormhole_n300, blackhole_p100a)
+└─ sim_stats/cycles/          cycle estimator · CONSUMER
+   ├─ parse.py                trace → per-kernel work
+   ├─ types.py
+   ├─ model.py                cycle math
+   ├─ report.py
+   ├─ cli.py
+   └─ hw_profiles/            bundled JSON profiles
 ```
 
-The only cross-package coupling is the trace itself: the sim (producer) defines the event schema and emits events; `cycles` (consumer) reads the file. `--cycles` adds one lazy, one-directional import (`sim` → `sim_stats`) purely for ergonomics; `sim_stats` is top-level in both the source and installed layouts, so that import is stable.
+---
 
-Today the estimator has its own runnable entry (`python -m sim_stats.cycles`, backed by `tt-lang-sim-cycles`), separate from the stats tool (`python -m sim_stats`). Unifying the two is an open question — see [Limitations & Deferred Work](#limitations--deferred-work).
+## Hardware Validation
+
+Program-level accuracy is checked against device cycles on a matmul K-sweep (Wormhole N300, Blackhole P100a), `measured ≥ estimate` at every point. 
+
+Achieved DRAM utilization ~57–67% (WH) / ~82–92% (BH); tt-npe shows both DRAM-dominant, not NoC-bound (0% congestion). 
+
+The compute branch is exercised on a reuse-matmul (P100a) — the per-node compute bound holds. dtype movement scaling and the fp32 `fp32_dest_acc_en` penalty (~7%) are device-confirmed.
 
 ---
 
-## Validation
+## Current Limitations & Deferred Work
 
-Under ideal-peak there are no per-kernel hardware labels, so the estimator is validated for correctness, behavior, and sensitivity — not fit to measured cycles.
-
-- **Correctness** (regression fixtures): invariants — `2× tiles → 2× compute cycles`; `max(compute, movement) ≤ estimate ≤ compute + movement` (never additive); zero work → zero cycles; determinism. Plus hand-derived cross-checks on simple kernels.
-- **Behavior**: per-kernel decomposition (compute vs movement, dominant term, bound class) across a work-count matrix (compute-bound / memory-bound / mixed / multi-node), small → large.
-- **Sensitivity**: sweep the profile and confirm estimates and bound class shift sensibly.
-
-Program-level accuracy is checked against device cycles on a matmul K-sweep (Wormhole N300, Blackhole P100a): `measured ≥ estimate` at every point. Achieved DRAM utilization ~57–67% (WH) / ~82–92% (BH); tt-npe shows both DRAM-dominant, not NoC-bound (0% congestion). The compute branch is exercised on a reuse-matmul (P100a) — the per-node compute bound holds. dtype movement scaling and the fp32 `fp32_dest_acc_en` penalty (~7%) are device-confirmed.
-
----
-
-## Limitations & Deferred Work
-
-- **Compute rates are partial** — the SFPU default is the ideal 1-instruction floor (32 elem/clk); real SFPU ops cost more, scaling with instruction count (kernel-dependent → profiling), and the SFPU unpack/pack-BW limit is not modelled. The matmul (FPU) rate is HiFi4 (64 cyc/tile) with an fp32 variant; per-fidelity variation is deferred (tt-lang fixes HiFi4).
-- **Multicast movement is uncounted** — pipe copies (`Block→Pipe`, `Pipe→Block`) carry no locality fields, so a multicast fan-out contributes zero movement work. Kernels dominated by multicast (reuse/mcast matmul) are under-modelled on the movement path; pipe-copy byte-accounting is the next model factor.
-- **dtype** — compute rate keys on `(op_type, dtype)`; the one modelled effect is fp32 matmul's `fp32_dest_acc_en` (~7%). bf16/bfp8 use the HiFi4 baseline (fidelity fixed). Movement byte-size follows `bytes_per_tile` (bf16 2048 / fp32 4096 / bfp8 ~1088).
-- **`broadcast` / `transpose` are not charged** as compute.
-- **Latency regime** — not in the bound. Fill/drain is reported as an informational delta only (see the model section); the rigorous version (exact fill/drain, cross-node serialization from the dependency DAG) is still deferred.
-- **DRAM ceiling is the spec, not the achievable** — `dram_aggregate_gbps = 288` is the spec upper bound: valid but loose. A per-workload utilization factor is the cleaner tightening.
-- **Behavioral-coverage and sensitivity sweeps**, and per-family / per-size reporting, are not yet built out.
-- **Unified `sim_stats` entry (open — needs discussion)** — a `python -m sim_stats stats|cycles` subcommand dispatcher instead of two separate entries; restructures the stats tool, so its own change.
+- **Multicast movement is uncounted** — pipe copies contribute zero bytes, so multicast-heavy kernels (reuse/mcast matmul) are under-counted.
+- **Broadcast / transpose** — not charged as compute.
+- **SFPU rate is a placeholder** — an ideal 1-instruction floor, not a calibrated per-op peak (matmul is solid).
+- **Unified `sim_stats` entry** — one `stats|cycles` subcommand instead of two (needs discussion).
